@@ -1,0 +1,1 @@
+"""Artifact publisher adapters."""

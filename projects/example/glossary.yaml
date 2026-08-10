@@ -1,0 +1,19 @@
+schema_version: 1
+terms:
+  # exact 仅在整条源文完全一致时生效，适合按钮等固定短语。
+  - source: Start Game
+    target: 开始游戏
+    source_locale: en-US
+    target_locale: zh-Hans
+    match_mode: exact
+    status: reviewed
+    provenance: human
+
+  # word 可在较长句子中匹配完整单词，适合 UI 术语。
+  - source: Health
+    target: 生命值
+    source_locale: en-US
+    target_locale: zh-Hans
+    match_mode: word
+    status: reviewed
+    provenance: human

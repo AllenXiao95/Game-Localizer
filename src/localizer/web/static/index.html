@@ -1,0 +1,1442 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Localizer 观测面板</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f7f9; --panel: #ffffff; --border: #e3e6ea; --fg: #1b1f24;
+    --muted: #656d76; --accent: #2f6feb; --ok: #1a7f37; --warn: #9a6700;
+    --err: #cf222e; --chip: #eef1f4; --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0d1117; --panel: #161b22; --border: #2a313a; --fg: #e6edf3;
+      --muted: #8b949e; --accent: #4c8dff; --ok: #3fb950; --warn: #d29922;
+      --err: #f85149; --chip: #21262d;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+         font: 14px/1.6 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
+  a { color: var(--accent); }
+  header { padding: 14px 20px; background: var(--panel); border-bottom: 1px solid var(--border);
+           display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+  header h1 { margin: 0; font-size: 16px; font-weight: 650; }
+  .grow { flex: 1; }
+  .chip { display: inline-flex; align-items: center; gap: 6px; padding: 2px 9px; border-radius: 999px;
+          background: var(--chip); font-size: 12px; color: var(--muted); white-space: nowrap; }
+  .chip.ok { color: var(--ok); } .chip.warn { color: var(--warn); } .chip.err { color: var(--err); }
+  .chip b { color: var(--fg); font-weight: 600; }
+  main { padding: 18px 20px 48px; max-width: 1400px; margin: 0 auto; }
+  section { background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+            padding: 16px; margin-bottom: 16px; }
+  section > h2 { margin: 0 0 12px; font-size: 13px; letter-spacing: .04em; text-transform: uppercase;
+                 color: var(--muted); font-weight: 650; }
+  .rowflex { display: flex; flex-wrap: wrap; gap: 10px; }
+  .pipeline { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 4px; }
+  .stage { flex: 1 0 130px; border: 1px solid var(--border); border-radius: 8px; padding: 9px 11px;
+           background: var(--bg); position: relative; }
+  .stage .k { font-size: 12px; color: var(--muted); }
+  .stage .n { font-weight: 620; margin: 2px 0 3px; }
+  .stage .d { font-size: 12px; color: var(--muted); line-height: 1.45; }
+  .stage[data-state="done"] { border-color: var(--ok); }
+  .stage[data-state="running"] { border-color: var(--accent); }
+  .stage[data-state="blocked"] { border-color: var(--err); }
+  .stage .badge { position: absolute; top: 8px; right: 9px; font-size: 11px; }
+  .layout { display: grid; grid-template-columns: minmax(220px, 300px) 1fr; gap: 16px; align-items: start; }
+  @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
+  .runlist { max-height: 70vh; overflow: auto; }
+  .run { padding: 9px 11px; border: 1px solid var(--border); border-radius: 8px; margin-bottom: 7px;
+         cursor: pointer; background: var(--bg); }
+  .run:hover { border-color: var(--accent); }
+  .run[aria-selected="true"] { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, var(--panel)); }
+  .run .id { font-family: var(--mono); font-size: 13px; font-weight: 600; word-break: break-all; }
+  .run .meta { font-size: 12px; color: var(--muted); margin-top: 3px; }
+  .bar { height: 6px; border-radius: 999px; background: var(--chip); overflow: hidden; margin-top: 6px; }
+  .bar > i { display: block; height: 100%; background: var(--ok); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 9px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; white-space: nowrap; }
+  td.mono, .mono { font-family: var(--mono); font-size: 12px; word-break: break-all; }
+  /* 长列表一律固定高度滚动。真实数据量级：2936 条 QA、198 个文件、3660 个批次事件 ——
+     不封顶的话页面会长到几万像素，滚动条完全失去参照，而且表头一滚就没了，
+     底下几百行不知道哪列是哪列。`.scroll` 此前只做横向，纵向是敞开的。 */
+  .scroll { overflow: auto; max-height: 420px; overscroll-behavior: contain; }
+  .scroll.tall { max-height: min(62vh, 680px); }
+  .scroll.short { max-height: 230px; }
+  /* 少数天然只有几行的表（制品元数据之类），封顶反而多一条没用的滚动边界 */
+  .scroll.free { max-height: none; }
+  /* 固定高度下表头必须钉住 */
+  .scroll table { border-collapse: separate; border-spacing: 0; }
+  .scroll thead th { position: sticky; top: 0; z-index: 1; background: var(--panel);
+                     box-shadow: inset 0 -1px 0 var(--border); }
+  .scroll td { border-bottom: 1px solid var(--border); }
+  .scroll th { border-bottom: none; }
+  .tabs { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 12px; }
+  .tabs button { border: 1px solid var(--border); background: var(--bg); color: var(--fg);
+                 padding: 5px 12px; border-radius: 7px; cursor: pointer; font-size: 13px; }
+  .tabs button[aria-selected="true"] { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  input, select, textarea { background: var(--bg); color: var(--fg); border: 1px solid var(--border);
+                  border-radius: 7px; padding: 5px 9px; font: inherit; }
+  textarea { width: 100%; min-height: 76px; resize: vertical; line-height: 1.6; }
+  button[disabled] { opacity: .55; cursor: not-allowed; }
+  /* 审查视图：diff 与高亮。深浅两套都靠 color-mix 从既有变量派生，不新增色值。 */
+  ins { background: color-mix(in srgb, var(--ok) 20%, transparent); text-decoration: none; }
+  del { background: color-mix(in srgb, var(--err) 20%, transparent); }
+  mark.hl-term { background: color-mix(in srgb, var(--warn) 32%, transparent); color: inherit; }
+  mark.hl-ph { background: color-mix(in srgb, var(--accent) 26%, transparent); color: inherit;
+               font-family: var(--mono); }
+  .visible-text { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.65; }
+  .newline-marker { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent);
+                    border-radius: 4px; padding: 0 3px; font-size: 11px; user-select: none; }
+  .reviewgrid { display: grid; grid-template-columns: minmax(260px, 420px) 1fr; gap: 16px;
+                align-items: start; }
+  @media (max-width: 1000px) { .reviewgrid { grid-template-columns: 1fr; } }
+  .queue { max-height: min(62vh, 680px); overflow: auto; overscroll-behavior: contain; }
+  .qitem { padding: 9px 11px; border: 1px solid var(--border); border-radius: 8px;
+           margin-bottom: 7px; cursor: pointer; background: var(--bg); }
+  .qitem:hover { border-color: var(--accent); }
+  .qitem[aria-selected="true"] { border-color: var(--accent);
+           background: color-mix(in srgb, var(--accent) 10%, var(--panel)); }
+  /* 已修复：整条淡绿 + 左侧色条。它们被排到列表底部，颜色是为了在滚到底时
+     一眼分清「做完的」与「还没碰的」，而不是让人再读一遍状态文字。 */
+  .qitem.done { border-left: 3px solid var(--ok);
+                background: color-mix(in srgb, var(--ok) 8%, var(--bg)); }
+  .qitem.done .src { color: color-mix(in srgb, var(--ok) 55%, var(--muted)); }
+  .qitem.done[aria-selected="true"] {
+           background: color-mix(in srgb, var(--ok) 16%, var(--panel)); }
+  .difftext { padding: 8px; border: 1px solid var(--border); border-radius: 8px;
+              line-height: 1.7; word-break: break-word; }
+  .qitem .src { font-size: 12px; color: var(--muted); word-break: break-word; }
+  .qitem .var { margin-top: 4px; font-size: 13px; word-break: break-word; }
+  .keys { font-size: 12px; color: var(--muted); border-top: 1px solid var(--border);
+          padding-top: 8px; margin-top: 10px; }
+  .keys kbd { background: var(--chip); border-radius: 4px; padding: 1px 5px;
+              font-family: var(--mono); font-size: 11px; }
+  button.action { border: 1px solid var(--accent); background: var(--accent); color: #fff;
+                  border-radius: 7px; padding: 6px 12px; cursor: pointer; font: inherit; }
+  button.secondary { background: var(--bg); color: var(--fg); border-color: var(--border); }
+  .taskgrid { display: grid; grid-template-columns: minmax(160px, .8fr) minmax(160px, .7fr)
+              minmax(280px, 2fr) minmax(110px, .5fr); gap: 10px; align-items: end; }
+  .taskgrid label { display: grid; gap: 5px; font-size: 12px; color: var(--muted); }
+  .taskgrid input, .taskgrid select { width: 100%; box-sizing: border-box; }
+  @media (max-width: 900px) { .taskgrid { grid-template-columns: 1fr; } }
+  pre { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 11px;
+        overflow: auto; max-height: 460px; font-family: var(--mono); font-size: 12px; margin: 0; }
+  .kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; font-size: 13px; }
+  .kv dt { color: var(--muted); } .kv dd { margin: 0; word-break: break-all; }
+  .muted { color: var(--muted); }
+  .sev-error { color: var(--err); font-weight: 600; }
+  .sev-warning { color: var(--warn); font-weight: 600; }
+  .empty { color: var(--muted); padding: 14px; text-align: center; }
+  .note { font-size: 12px; color: var(--muted); border-left: 3px solid var(--border);
+          padding: 6px 0 6px 10px; margin-top: 10px; }
+  .workergrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+                gap: 10px; margin: 12px 0 16px; }
+  .worker-card { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px;
+                 background: var(--bg); min-width: 0; }
+  .worker-card .title { display: flex; align-items: center; justify-content: space-between;
+                        gap: 8px; margin-bottom: 5px; }
+  .worker-card .resource { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .file-progress { min-width: 150px; }
+  .file-progress .bar { margin-top: 3px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Localizer 观测面板</h1>
+  <span class="chip" id="projectChip">载入中…</span>
+  <span class="chip" id="tmChip"></span>
+  <span class="grow"></span>
+  <span class="chip" id="clock"></span>
+  <label class="chip"><input type="checkbox" id="autoRefresh" checked> 自动刷新 5s</label>
+</header>
+
+<main>
+  <section>
+    <h2>启动本地任务</h2>
+    <div class="taskgrid">
+      <label>任务预设
+        <select id="taskProfile"><option value="">临时配置（不套用预设）</option></select>
+      </label>
+      <label>游戏版本
+        <input id="taskVersion" autocomplete="off" placeholder="例如 1.44.0.0">
+      </label>
+      <label>源文件或源目录（运行机器上的绝对/相对路径）
+        <input id="taskSource" autocomplete="off" placeholder="D:\\Games\\...\\lc_messages 或单个 .mo">
+      </label>
+      <label>构建模式
+        <select id="taskMode"><option value="preview">preview</option><option value="release">release</option></select>
+      </label>
+      <label>预设名称（保存时使用）
+        <input id="profileName" autocomplete="off" placeholder="例如 WOT RU 正式包">
+      </label>
+      <label>run_id（留空自动生成）
+        <input id="taskRunId" autocomplete="off" placeholder="自动生成">
+      </label>
+      <label>.env 文件（可选，留空使用项目自动发现）
+        <input id="taskDotenv" autocomplete="off" placeholder="D:\\workspace\\project\\.env">
+      </label>
+      <div class="rowflex" style="grid-column:span 2">
+        <button class="action secondary" id="saveProfile" type="button">保存 / 更新预设</button>
+        <button class="action secondary" id="preflightTask" type="button">分析待翻译内容</button>
+        <button class="action" id="launchTask" type="button" disabled>确认并启动</button>
+        <span class="chip" id="taskMessage"></span>
+      </div>
+    </div>
+    <div id="taskStatus" class="note">任务之间串行执行；单个任务会按 provider.concurrency 并行翻译不同资源文件，正式 TM 仍由主线程统一提交。预设不保存 API Token 或压缩密码；release 的 AES 密码从 project.yaml 指定的环境变量读取。release 构建通过后，可在“制品”页显式发布到全部已配置 target。</div>
+    <div id="preflightPanel" style="margin-top:12px"><div class="empty">启动前请先分析待翻译内容；预检不会调用模型或写入 TM。</div></div>
+  </section>
+
+  <section>
+    <h2>流水线</h2>
+    <div class="pipeline" id="pipeline"></div>
+    <div class="note">
+      面板提供受控的本地任务启动，以及针对 QA 报告已识别问题的<b>单人定点修复</b>
+      （编辑落本地 TM 并留审计）。它不组织人工审核流程：没有审核队列、任务分发或多人审批；
+      批量人工翻译与校对统一在 ParaTranz（M5）完成。此处不提供
+      stage 变更入口；人工翻译与校对统一在 ParaTranz（M5）完成。
+      阶段状态由磁盘产物反推，不是运行态权威状态。
+    </div>
+  </section>
+
+  <div class="layout">
+    <section>
+      <h2>运行 <span class="chip" id="runCount"></span></h2>
+      <div class="runlist" id="runlist"><div class="empty">载入中…</div></div>
+    </section>
+
+    <div>
+      <section id="detailPanel">
+        <h2>运行详情</h2>
+        <div class="tabs" id="tabs"></div>
+        <div id="tabBody"><div class="empty">左侧选择一次运行</div></div>
+      </section>
+
+      <section>
+        <h2>翻译记忆库</h2>
+        <div id="tmPanel"><div class="empty">载入中…</div></div>
+      </section>
+    </div>
+  </div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const num = (n) => (n ?? 0).toLocaleString("zh-CN");
+
+let overview = null, runs = [], selectedRun = null, detail = null, activeTab = "summary";
+let taskProfiles = [], tasks = [], currentPreflight = null;
+let qaFilter = { severity: "", code: "", q: "" };
+let qaOffset = 0;
+
+async function api(path) {
+  const res = await fetch(path, { headers: { Accept: "application/json" } });
+  if (!res.ok) throw new Error(`${res.status} ${path}`);
+  return res.json();
+}
+
+async function postApi(path, payload) {
+  const res = await fetch(path, {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json", "X-Localizer-Action": "1" },
+    body: JSON.stringify(payload),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.message || `${res.status} ${path}`);
+  return body;
+}
+
+/* -------------------------------------------------------------- task run */
+
+function taskPayload(includePreflight = false) {
+  const payload = {
+    version: $("taskVersion").value.trim(),
+    source_path: $("taskSource").value.trim(),
+    mode: $("taskMode").value,
+    run_id: $("taskRunId").value.trim() || undefined,
+    dotenv_path: $("taskDotenv").value.trim() || undefined,
+  };
+  if (includePreflight && currentPreflight) payload.preflight_id = currentPreflight.preflight_id;
+  return payload;
+}
+
+function invalidatePreflight() {
+  currentPreflight = null;
+  $("launchTask").disabled = true;
+  $("preflightPanel").innerHTML = `<div class="empty">参数已变化，请重新分析待翻译内容。</div>`;
+}
+
+function renderPreflight() {
+  const p = currentPreflight;
+  if (!p) return;
+  const pending = (p.files || []).filter((f) => f.pending_units > 0);
+  const scopes = Object.entries(p.by_match_scope || {}).map(([k, v]) =>
+    `<span class="chip">${esc(k)} <b>${num(v)}</b></span>`).join(" ") || "—";
+  const tokenizer = p.runtime?.tokenizer_ready
+    ? `Tokenizer ready: <span class="mono">${esc(p.runtime.tokenizer_source || "conservative estimator")}</span>`
+    : "";
+  const rows = pending.map((f) => `<tr>
+    <td class="mono">${esc(f.relative_path)}</td>
+    <td>${num(f.extracted_units)}</td><td>${num(f.tm_hits)}</td>
+    <td><b>${num(f.pending_units)}</b></td>
+    <td>${Object.entries(f.by_match_scope || {}).map(([k, v]) =>
+      `<span class="chip">${esc(k)} ${num(v)}</span>`).join(" ") || "—"}</td>
+  </tr>`).join("");
+  $("preflightPanel").innerHTML = `<div class="rowflex" style="margin-bottom:10px">
+      <span class="chip">扫描文件 <b>${num(p.files_total)}</b></span>
+      <span class="chip warn">待翻译文件 <b>${num(p.files_pending)}</b></span>
+      <span class="chip">提取词条 <b>${num(p.extracted_units)}</b></span>
+      <span class="chip ok">TM 命中 <b>${num(p.tm_hits)}</b></span>
+      <span class="chip warn">待翻译词条 <b>${num(p.pending_units)}</b></span>
+    </div>
+    <div class="note">TM 命中来源：${scopes}<br>计划指纹：<span class="mono">${esc(p.plan_fingerprint.slice(0, 16))}…</span>。正式启动时会重新扫描并校验该指纹。</div>
+    ${tokenizer ? `<div class="note">${tokenizer}</div>` : ""}
+    ${pending.length ? `<div class="scroll tall"><table><thead><tr><th>待翻译文件</th><th>提取</th><th>TM 命中</th><th>待翻译</th><th>命中来源</th></tr></thead>
+      <tbody>${rows}</tbody></table></div>` : `<div class="empty">所有词条均已有可用译文；启动后不会调用模型。</div>`}`;
+}
+
+function renderTaskProfiles() {
+  const selected = $("taskProfile").value;
+  $("taskProfile").innerHTML = `<option value="">临时配置（不套用预设）</option>` +
+    taskProfiles.map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("");
+  if (taskProfiles.some((p) => p.id === selected)) $("taskProfile").value = selected;
+}
+
+// M6：对象级幂等跳过必须可见。GitHub/R2 摘要一致时会跳过重传，此前面板只显示
+// target:status，操作者看到"成功"却无法区分"真上传了"和"什么都没做"——
+// 而这两者在一次补发里是完全不同的结论。
+//
+// 抽成独立函数是为了**能被真正执行地测试**。它原来内联在 renderTaskStatus 里，
+// 测试只能断言源码里出现过 `o.skipped`/"上传"/"跳过" —— 于是把 filter 写成
+// `!o.skipped`（上传与跳过对调）依然全绿，而面板会把"上传 2 跳过 1"显示成
+// "上传 1 跳过 2"。tests/test_release_observability.py 现在用 node 执行这个函数。
+function publishSummary(target) {
+  const objects = target.objects || [];
+  // 旧回执没有 objects，更旧的回执有 objects 但没有 skipped 字段。
+  // 前者退回 target:status；后者 undefined 一律当成"没跳过"，
+  // 也就是按老口径全算上传 —— 这是唯一不会误导的降级。
+  if (!objects.length) return `${target.target}:${target.status}`;
+  const skipped = objects.filter((o) => o.skipped).length;
+  const moved = objects.length - skipped;
+  return `${target.target}:${target.status}(上传 ${moved}/跳过 ${skipped})`;
+}
+
+function renderTaskStatus() {
+  const latest = tasks[0];
+  if (!latest) return;
+  const gate = latest.result?.quality_gate;
+  const publishing = latest.kind === "publish" ? latest.result : null;
+  const cls = latest.status === "failed" || gate?.passed === false || publishing?.passed === false
+    ? "err" : ["completed", "succeeded"].includes(latest.status) ? "ok" : "warn";
+  const gateText = publishing
+    ? (publishing.passed ? "全部发布目标成功" : "存在发布目标失败")
+    : gate
+    ? (gate.passed ? "QA 通过" : `QA 未通过：${num(gate.error_count)} error / ${num(gate.failed_unit_count)} failed`)
+    : "QA 尚未完成";
+  // M6：对象级幂等跳过必须可见。GitHub/R2 摘要一致时会跳过重传，此前面板只显示
+  // target:status，操作者看到"成功"却无法区分"真上传了"和"什么都没做"——
+  // 而这两者在一次补发里是完全不同的结论。
+  const publishDetail = publishing?.targets?.map((x) => publishSummary(x)).join(" / ");
+  const detail = latest.error?.message || publishDetail || latest.result?.artifact || latest.result?.output_root || "等待执行";
+  const lineage = latest.parent_run_id
+    ? ` · 增量重建自 <span class="mono">${esc(latest.parent_run_id)}</span>` : "";
+  const rebuild = latest.result?.rebuild;
+  const reuseSource = rebuild?.reuse_checkpoint_run_id
+    && rebuild.reuse_checkpoint_run_id !== latest.parent_run_id
+    ? ` · checkpoint <span class="mono">${esc(rebuild.reuse_checkpoint_run_id)}</span>` : "";
+  const reuse = rebuild
+    ? `${reuseSource} · 复用 ${num(rebuild.reused)} / 重试 ${num(rebuild.retried)} / 人工解决 ${num(rebuild.resolved_by_human)}`
+    : "";
+  $("taskStatus").innerHTML = `最近任务 <span class="mono">${esc(latest.run_id)}</span>
+    <span class="chip ${cls}">${esc(latest.status)}</span>
+    <span class="chip ${(gate?.passed || publishing?.passed) ? "ok" : (gate || publishing) ? "err" : "warn"}">${esc(gateText)}</span>
+    ${lineage}${reuse} · ${esc(detail)}`;
+}
+
+function bindTaskForm() {
+  $("taskProfile").addEventListener("change", () => {
+    const profile = taskProfiles.find((p) => p.id === $("taskProfile").value);
+    if (!profile) return;
+    $("profileName").value = profile.name;
+    $("taskVersion").value = profile.version;
+    $("taskSource").value = profile.source_path;
+    $("taskMode").value = profile.mode;
+    $("taskDotenv").value = profile.dotenv_path || "";
+    invalidatePreflight();
+  });
+  for (const id of ["taskVersion", "taskSource", "taskMode", "taskDotenv"]) {
+    $(id).addEventListener(id === "taskMode" ? "change" : "input", invalidatePreflight);
+  }
+  $("saveProfile").addEventListener("click", async () => {
+    try {
+      const profile = await postApi("/api/task-profiles", {
+        ...taskPayload(),
+        id: $("taskProfile").value || undefined,
+        name: $("profileName").value.trim(),
+      });
+      taskProfiles = (await api("/api/task-profiles")).profiles;
+      renderTaskProfiles(); $("taskProfile").value = profile.id;
+      $("taskMessage").className = "chip ok"; $("taskMessage").textContent = "预设已保存";
+    } catch (err) {
+      $("taskMessage").className = "chip err"; $("taskMessage").textContent = err.message;
+    }
+  });
+  $("preflightTask").addEventListener("click", async () => {
+    $("preflightTask").disabled = true;
+    $("taskMessage").className = "chip warn";
+    $("taskMessage").textContent = "正在只读扫描资源与 TM…";
+    try {
+      currentPreflight = await postApi("/api/tasks/preflight", taskPayload());
+      renderPreflight();
+      $("launchTask").disabled = false;
+      $("taskMessage").className = "chip ok";
+      $("taskMessage").textContent = `预检完成：${num(currentPreflight.pending_units)} 条待翻译`;
+    } catch (err) {
+      currentPreflight = null;
+      $("launchTask").disabled = true;
+      $("preflightPanel").innerHTML = `<div class="empty">预检失败：${esc(err.message)}</div>`;
+      $("taskMessage").className = "chip err"; $("taskMessage").textContent = err.message;
+    } finally {
+      $("preflightTask").disabled = false;
+    }
+  });
+  $("launchTask").addEventListener("click", async () => {
+    try {
+      if (!currentPreflight) throw new Error("请先分析待翻译内容");
+      const task = await postApi("/api/tasks/run", taskPayload(true));
+      $("taskRunId").value = task.run_id;
+      $("taskMessage").className = "chip ok"; $("taskMessage").textContent = "任务已入队";
+      currentPreflight = null; $("launchTask").disabled = true;
+      tasks = (await api("/api/tasks")).tasks; renderTaskStatus();
+      activeTab = "live";
+      await refresh();
+      await selectRun(task.run_id);
+    } catch (err) {
+      $("taskMessage").className = "chip err"; $("taskMessage").textContent = err.message;
+    }
+  });
+}
+
+/* ---------------------------------------------------------------- pipeline */
+
+function renderPipeline() {
+  if (!overview) return;
+  const current = detail?.stage || null;
+  const order = overview.pipeline.map((s) => s.key);
+  const idx = current ? order.indexOf(current.key) : -1;
+  $("pipeline").innerHTML = overview.pipeline.map((s, i) => {
+    let state = "idle";
+    if (idx >= 0) {
+      if (i < idx) state = "done";
+      else if (i === idx) state = current.state;
+    }
+    const badge = { done: "✓", running: "▶", blocked: "✕" }[state] || "";
+    return `<div class="stage" data-state="${state}" title="${esc(s.detail)}">
+      <div class="badge">${badge}</div>
+      <div class="k">${esc(s.milestone)}</div>
+      <div class="n">${esc(s.label)}</div>
+      <div class="d">${esc(s.detail)}</div>
+    </div>`;
+  }).join("");
+}
+
+/* ------------------------------------------------------------------- runs */
+
+function renderRuns() {
+  $("runCount").textContent = `${runs.length} 次`;
+  if (!runs.length) {
+    $("runlist").innerHTML = `<div class="empty">工作区与输出目录下暂无运行记录</div>`;
+    return;
+  }
+  $("runlist").innerHTML = runs.map((r) => {
+    const p = r.progress?.available ? r.progress : null;
+    const gate = r.qa?.available
+      ? (r.qa.passed ? `<span class="chip ok">闸门通过</span>`
+                     : `<span class="chip err">闸门阻断 ${num(r.qa.error_count)} error</span>`)
+      : "";
+    return `<div class="run" data-run="${esc(r.run_id)}"
+              aria-selected="${r.run_id === selectedRun}">
+      <div class="id">${esc(r.run_id)}</div>
+      <div class="meta">${r.modes.map((m) => `<span class="chip">${m}</span>`).join(" ")} ${gate}
+        ${r.task?.parent_run_id ? `<span class="chip">↳ ${esc(r.task.parent_run_id)}</span>` : ""}</div>
+      <div class="meta">${esc(r.stage?.note || "")}</div>
+      ${p ? `<div class="bar"><i style="width:${p.percent}%"></i></div>
+             <div class="meta">${num(p.succeeded)}/${num(p.total)} 成功 · ${p.percent}%</div>` : ""}
+    </div>`;
+  }).join("");
+  $("runlist").querySelectorAll(".run").forEach((el) =>
+    el.addEventListener("click", () => selectRun(el.dataset.run)));
+}
+
+async function selectRun(runId) {
+  selectedRun = runId;
+  renderRuns();
+  detail = await api(`/api/runs/${encodeURIComponent(runId)}`);
+  renderPipeline();
+  renderTabs();
+  await renderTab();
+}
+
+/* ------------------------------------------------------------------- tabs */
+
+const TABS = [
+  ["summary", "概览"], ["live", "实时翻译"], ["qa", "QA 问题"], ["review", "审查修复"],
+  ["batches", "批次"], ["artifact", "制品"], ["files", "文件与日志"],
+];
+
+// 自动刷新会整块重绘 tab。审查视图里有未提交的编辑状态与光标，重绘就等于
+// 把人正在做的事情擦掉 —— 这一条必须先做，其余审查功能全都依赖它。
+const TAB_REBUILD = { review: false };
+
+function renderTabs() {
+  $("tabs").innerHTML = TABS.map(([k, label]) =>
+    `<button data-tab="${k}" aria-selected="${k === activeTab}">${label}</button>`).join("");
+  $("tabs").querySelectorAll("button").forEach((b) =>
+    b.addEventListener("click", async () => { activeTab = b.dataset.tab; renderTabs(); await renderTab(); }));
+}
+
+async function renderTab() {
+  if (!detail) return;
+  const body = $("tabBody");
+  if (activeTab === "review") { await renderReview(); return; }
+  if (activeTab === "summary") body.innerHTML = viewSummary();
+  else if (activeTab === "live") body.innerHTML = viewLive();
+  else if (activeTab === "batches") body.innerHTML = viewBatches();
+  else if (activeTab === "artifact") { body.innerHTML = viewArtifact(); bindArtifact(); }
+  else if (activeTab === "files") { body.innerHTML = viewFiles(); bindFiles(); }
+  else if (activeTab === "qa") { body.innerHTML = viewQaShell(); bindQa(); await loadQa(); }
+}
+
+function unavailable(node) {
+  return `<div class="empty">${esc(node?.reason || "暂无数据")}</div>`;
+}
+
+function viewSummary() {
+  const p = detail.progress, q = detail.qa, r = detail.runtime;
+  const kv = (rows) => `<dl class="kv">${rows.map(([k, v]) =>
+    `<dt>${esc(k)}</dt><dd>${v}</dd>`).join("")}</dl>`;
+  const progress = p?.available
+    ? kv([["总词条", num(p.total)], ["成功", num(p.succeeded)], ["失败/待重试", num(p.failed)],
+          ["完成度", `${p.percent}%`],
+          ["按状态", Object.entries(p.by_state).map(([k, v]) =>
+            `<span class="chip">${esc(k)} <b>${num(v)}</b></span>`).join(" ")]])
+    : unavailable(p);
+  const qa = q?.available
+    ? kv([["闸门", q.passed ? `<span class="chip ok">通过</span>`
+                           : `<span class="chip err">阻断</span>`],
+          ["error", num(q.error_count)], ["失败词条", num(q.failed_unit_count)],
+          ["问题总数", num(q.issue_total)],
+          ["按类别", Object.entries(q.by_code).map(([k, v]) =>
+            `<span class="chip">${esc(k)} <b>${num(v)}</b></span>`).join(" ") || "—"]])
+    : unavailable(q);
+  const workers = r?.workers?.length
+    ? r.workers.map((w) => `<div><span class="chip ${w.state === "running" ? "warn" : ""}">${esc(w.worker_id)}</span>
+        ${esc(w.state)} · <span class="mono">${esc(w.resource_path || "—")}</span>
+        ${w.batch_id ? ` · ${esc(w.batch_id)} (${num(w.batch_size)} 条)` : ""}</div>`).join("")
+    : "尚无 worker 状态";
+  const runtime = r?.available
+    ? kv([["当前文件", workers],
+          ["文件进度", `${num(r.translation_files_completed)}/${num(r.translation_files_total)}`],
+          ["Provider 请求", num(r.requests)],
+          ["输入 Token", num(r.input_tokens)],
+          ["输出 Token", num(r.output_tokens)],
+          ["总 Token", num(r.total_tokens)]])
+    : unavailable(r);
+  const rebuild = detail.task?.rebuild;
+  const reuseSource = rebuild?.reuse_checkpoint_run_id
+    && rebuild.reuse_checkpoint_run_id !== detail.task?.parent_run_id
+    ? ` · 复用 checkpoint <span class="mono">${esc(rebuild.reuse_checkpoint_run_id)}</span>` : "";
+  const lineage = detail.task?.parent_run_id
+    ? `<div class="note"><b>增量重建</b>：父运行 <span class="mono">${esc(detail.task.parent_run_id)}</span>`
+      + (rebuild ? ` · 复用 ${num(rebuild.reused)} · 重试 ${num(rebuild.retried)}`
+        + ` · 人工解决 ${num(rebuild.resolved_by_human)} · stale ${num(rebuild.stale)}${reuseSource}` : "")
+      + `</div>` : "";
+  return `<div class="rowflex" style="gap:24px">
+      <div style="flex:1 1 300px"><h3 style="font-size:13px;margin:0 0 8px">翻译进度</h3>${progress}</div>
+      <div style="flex:1 1 300px"><h3 style="font-size:13px;margin:0 0 8px">QA 与闸门</h3>${qa}</div>
+      <div style="flex:1 1 360px"><h3 style="font-size:13px;margin:0 0 8px">模型运行</h3>${runtime}</div>
+    </div>${lineage}
+    <div class="note">路径：<span class="mono">${esc(detail.paths.workspace || "—")}</span></div>`;
+}
+
+function stateChip(state) {
+  const cls = state === "completed" || state === "succeeded" || state === "idle"
+    ? "ok" : state === "failed" || state === "completed_with_failures"
+      ? "err" : state === "running" || state === "retryable" || state === "split_required"
+        ? "warn" : "";
+  return `<span class="chip ${cls}">${esc(state || "unknown")}</span>`;
+}
+
+function legacyLiveFiles(runtime) {
+  const grouped = new Map();
+  for (const batch of detail.batches?.rows || []) {
+    const path = batch.resource_path;
+    if (!path) continue;
+    const row = grouped.get(path) || {
+      relative_path: path, state: "running", worker_id: batch.worker_id,
+      units_total: 0, units_succeeded: 0, units_failed: 0, units_processed: 0,
+      percent: null, batches_total: 0, requests: 0, input_tokens: 0, output_tokens: 0,
+      batch_id: batch.batch_id, batch_state: batch.state, reason: batch.reason,
+    };
+    row.batches_total += 1; row.requests += batch.attempts || 0;
+    row.input_tokens += batch.input_tokens || 0; row.output_tokens += batch.output_tokens || 0;
+    if (batch.index >= (row.index ?? -1)) {
+      row.index = batch.index; row.worker_id = batch.worker_id; row.batch_id = batch.batch_id;
+      row.batch_state = batch.state; row.reason = batch.reason;
+      row.state = batch.state === "succeeded" ? "completed"
+        : batch.state === "failed" ? "completed_with_failures" : "running";
+    }
+    grouped.set(path, row);
+  }
+  for (const worker of runtime.workers || []) {
+    if (worker.state === "running" && grouped.has(worker.resource_path)) {
+      grouped.get(worker.resource_path).state = "running";
+    }
+  }
+  return [...grouped.values()].sort((a, b) =>
+    (a.state === "running" ? 0 : 1) - (b.state === "running" ? 0 : 1) ||
+    a.relative_path.localeCompare(b.relative_path));
+}
+
+function viewLive() {
+  const runtime = detail.runtime;
+  if (!runtime?.available) return unavailable(runtime);
+  const workers = runtime.workers || [];
+  const structuredFiles = runtime.files || [];
+  const files = structuredFiles.length ? structuredFiles : legacyLiveFiles(runtime);
+  const legacyCheckpoint = !structuredFiles.length && files.length;
+  const events = detail.batches?.recent_events || [];
+  const activeWorkers = workers.filter((w) => w.state === "running").length;
+  const workerCards = workers.length ? workers.map((w) => `<div class="worker-card">
+      <div class="title"><b class="mono">${esc(w.worker_id)}</b>${stateChip(w.state)}</div>
+      <div class="resource mono" title="${esc(w.resource_path || "")}">${esc(w.resource_path || "等待文件")}</div>
+      <div class="muted">${w.batch_id ? `${esc(w.batch_id)} · ${num(w.batch_size)} 条 · ${esc(w.batch_state || "")}` : "当前无批次"}</div>
+      <div class="muted">${esc(w.updated_at || "—")}</div>
+    </div>`).join("") : `<div class="empty">worker 尚未启动</div>`;
+  const fileRows = files.length ? files.map((f) => `<tr>
+      <td class="mono" title="${esc(f.relative_path)}">${esc(f.relative_path)}</td>
+      <td>${stateChip(f.state)}<br><span class="muted mono">${esc(f.worker_id || "—")}</span></td>
+      <td class="file-progress">${f.units_total ? `<b>${num(f.units_processed)}/${num(f.units_total)}</b> · ${num(f.percent)}%
+        <div class="bar"><i style="width:${Math.max(0, Math.min(100, f.percent || 0))}%"></i></div>`
+        : `<span class="muted">旧 checkpoint 未记录词条级文件进度</span>`}</td>
+      <td><span class="sev-error">${num(f.units_failed)}</span> / ${num(f.units_succeeded)}</td>
+      <td>${num(f.batches_total)} / ${num(f.requests)}</td>
+      <td>${num(f.input_tokens)} / ${num(f.output_tokens)}</td>
+      <td><span class="mono">${esc(f.batch_id || "—")}</span><br><span class="muted">${esc(f.batch_state || f.reason || "—")}</span></td>
+    </tr>`).join("") : `<tr><td colspan="7" class="empty">没有待模型翻译的文件</td></tr>`;
+  const eventRows = events.slice(0, 30).map((e) => `<tr>
+      <td class="mono">${esc(e.timestamp || "—")}</td><td class="mono">${esc(e.worker_id || "—")}</td>
+      <td class="mono">${esc(e.resource_path || "—")}</td><td>${stateChip(e.state)}</td>
+      <td>${num(e.input_tokens)} / ${num(e.output_tokens)}</td><td class="muted">${esc(e.reason || "—")}</td>
+    </tr>`).join("");
+  // checkpoint 落盘降级不再终止运行，但绝不能静默：不可见的降级会让人以为
+  // 一切正常，直到断点恢复时发现少了一批已经付过钱的译文。
+  const degraded = runtime.checkpoint_degraded ? `<div class="note" style="border-color:#b34;color:#e88">
+      ⚠ checkpoint 落盘降级中（连续失败 ${num(runtime.checkpoint_flush_failures)} 次）：运行继续，
+      但断点恢复可能会重译最近这段窗口内的词条。最近一次错误：<span class="mono">${esc(runtime.checkpoint_last_error || "—")}</span>
+    </div>` : "";
+  return `${degraded}<div class="rowflex">
+      <span class="chip">worker <b>${num(activeWorkers)}/${num(workers.length)} 活跃</b></span>
+      <span class="chip">文件 <b>${num(runtime.translation_files_completed)}/${num(runtime.translation_files_total)}</b></span>
+      <span class="chip warn">运行中 <b>${num(runtime.translation_files_running)}</b></span>
+      <span class="chip">排队 <b>${num(runtime.translation_files_queued)}</b></span>
+      <span class="chip err">异常文件 <b>${num(runtime.translation_files_failed)}</b></span>
+      <span class="chip">请求 <b>${num(runtime.requests)}</b></span>
+      <span class="chip">Token 入/出 <b>${num(runtime.input_tokens)} / ${num(runtime.output_tokens)}</b></span>
+    </div>
+    <div class="workergrid">${workerCards}</div>
+    <h3 style="font-size:13px;margin:0 0 8px">文件级实时进度</h3>
+    <div class="scroll tall"><table><thead><tr><th>文件</th><th>状态 / worker</th><th>词条进度</th>
+      <th>失败 / 成功</th><th>批次 / 请求</th><th>Token 入/出</th><th>当前批次</th></tr></thead>
+      <tbody>${fileRows}</tbody></table></div>
+    <h3 style="font-size:13px;margin:16px 0 8px">最近批次事件</h3>
+    ${eventRows ? `<div class="scroll short"><table><thead><tr><th>时间</th><th>worker</th><th>文件</th><th>状态</th><th>Token 入/出</th><th>原因</th></tr></thead><tbody>${eventRows}</tbody></table></div>`
+                : `<div class="empty">尚无批次事件</div>`}
+    <div class="note">本视图每 5 秒刷新；Token 在 Provider 返回时立即记入 checkpoint，即使响应随后因协议或 QA 问题重试也不会漏计。${legacyCheckpoint ? " 当前运行使用 schema v2，文件行由批次事件兼容还原；下一次运行将使用 schema v3 展示精确词条进度。" : ""}</div>`;
+}
+
+function viewBatches() {
+  const b = detail.batches;
+  if (!b?.available) return unavailable(b);
+  if (!b.rows.length) return `<div class="empty">本次运行没有批次记录</div>`;
+  return `<div class="rowflex" style="margin-bottom:10px">${
+    Object.entries(b.by_state).map(([k, v]) =>
+      `<span class="chip">${esc(k)} <b>${num(v)}</b></span>`).join("")}</div>
+    <div class="scroll tall"><table><thead><tr><th>批次</th><th>文件 / worker</th><th>终态</th>
+      <th>词条</th><th>请求</th><th>Token 入/出</th><th>原因</th></tr></thead>
+    <tbody>${b.rows.map((r) => `<tr><td class="mono">${esc(r.batch_id)}</td>
+      <td><span class="mono">${esc(r.resource_path || "—")}</span><br><span class="muted">${esc(r.worker_id || "—")}</span></td>
+      <td>${esc(r.state)}</td><td>${num(r.size)}</td><td>${num(r.attempts)}</td>
+      <td>${num(r.input_tokens)} / ${num(r.output_tokens)}</td>
+      <td class="muted">${esc(r.reason) || "—"}</td></tr>`).join("")}</tbody></table></div>
+    <h3 style="font-size:13px;margin:16px 0 8px">最近事件</h3>
+    <div class="scroll short"><table><thead><tr><th>时间</th><th>批次</th><th>文件</th><th>状态</th><th>Token 入/出</th><th>原因</th></tr></thead>
+    <tbody>${(b.recent_events || []).map((e) => `<tr><td class="mono">${esc(e.timestamp || "—")}</td>
+      <td class="mono">${esc(e.batch_id)}</td><td class="mono">${esc(e.resource_path || "—")}</td>
+      <td>${esc(e.state)}</td><td>${num(e.input_tokens)} / ${num(e.output_tokens)}</td>
+      <td class="muted">${esc(e.reason) || "—"}</td></tr>`).join("")}</tbody></table></div>`;
+}
+
+function viewArtifact() {
+  const a = detail.artifact;
+  if (!a?.available) return unavailable(a);
+  const meta = Object.entries(a.metadata || {}).map(([k, v]) =>
+    `<tr><td class="muted">${esc(k)}</td><td class="mono">${esc(
+      typeof v === "object" ? JSON.stringify(v) : v)}</td></tr>`).join("");
+  return `<dl class="kv">
+      <dt>制品</dt><dd class="mono">${esc(a.name)} ${a.exists ? "" : "<span class='chip err'>文件缺失</span>"}</dd>
+      <dt>SHA-256</dt><dd class="mono">${esc(a.sha256)}</dd>
+      <dt>大小</dt><dd>${num(a.size)} 字节 · ${num(a.file_count)} 个文件</dd>
+      <dt>闸门</dt><dd>${a.quality_gate_passed ? `<span class="chip ok">通过</span>` : `<span class="chip err">未通过</span>`}</dd>
+      <dt>创建于</dt><dd class="mono">${esc(a.created_at)}</dd>
+      <dt>Manifest</dt><dd class="mono">${esc(a.manifest)}</dd>
+    </dl>
+    <div class="rowflex" style="margin:14px 0">
+      <button class="action" id="publishRelease" type="button"
+        ${a.quality_gate_passed && a.exists ? "" : "disabled"}>发布到全部已配置目标</button>
+      <span class="chip" id="publishMessage">显式操作；不会在 release 构建后自动上传</span>
+    </div>
+    ${meta ? `<h3 style="font-size:13px;margin:14px 0 6px">Manifest 元数据</h3>
+      <div class="scroll free"><table><tbody>${meta}</tbody></table></div>` : ""}`;
+}
+
+function bindArtifact() {
+  const button = $("publishRelease"), message = $("publishMessage");
+  if (!button) return;
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    message.className = "chip warn";
+    message.textContent = "发布任务入队中…";
+    try {
+      const task = await postApi("/api/tasks/publish", { run_id: selectedRun });
+      message.className = "chip ok";
+      message.textContent = `发布任务 ${task.task_id.slice(0, 8)} 已入队；将依次尝试全部 target`;
+      tasks = (await api("/api/tasks")).tasks;
+      renderTaskStatus();
+    } catch (err) {
+      button.disabled = false;
+      message.className = "chip err";
+      message.textContent = err.message;
+    }
+  });
+}
+
+function viewFiles() {
+  const files = detail.files || [];
+  if (!files.length) return `<div class="empty">本次运行没有可查看的文本产物</div>`;
+  return `<div class="scroll tall"><table><thead><tr><th>文件</th><th>大小</th><th>修改时间</th></tr></thead>
+    <tbody>${files.map((f) => `<tr>
+      <td><a href="#" data-file="${esc(f.path)}" class="mono">${esc(f.name)}</a></td>
+      <td>${num(f.size)}</td><td class="mono">${esc(f.modified_at)}</td></tr>`).join("")}
+    </tbody></table></div><pre id="fileView" hidden></pre>`;
+}
+
+function bindFiles() {
+  $("tabBody").querySelectorAll("a[data-file]").forEach((a) =>
+    a.addEventListener("click", async (ev) => {
+      ev.preventDefault();
+      const view = $("fileView");
+      view.hidden = false;
+      view.textContent = "载入中…";
+      try {
+        const payload = await api(`/api/file?path=${encodeURIComponent(a.dataset.file)}`);
+        view.textContent = (payload.truncated ? "（已截断，仅显示末尾 256 KB）\n\n" : "") + payload.text;
+      } catch (err) { view.textContent = `读取失败：${err.message}`; }
+      view.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }));
+}
+
+/* --------------------------------------------------------------------- qa */
+
+function viewQaShell() {
+  const codes = Object.keys(detail.qa?.by_code || {});
+  return `<div class="rowflex" style="margin-bottom:12px">
+      <select id="qaSev"><option value="">全部严重度</option>
+        <option value="error">error</option><option value="warning">warning</option></select>
+      <select id="qaCode"><option value="">全部类别</option>
+        ${codes.map((c) => `<option value="${esc(c)}">${esc(c)}</option>`).join("")}</select>
+      <input id="qaQ" placeholder="搜索路径 / 词条 / 说明" style="flex:1 1 220px">
+      <span class="chip" id="qaCount"></span>
+    </div><div id="qaBody"><div class="empty">载入中…</div></div>`;
+}
+
+const QA_PAGE = 200;
+
+function bindQa() {
+  const trigger = () => {
+    // 换筛选条件必须回到第一页，否则会停在一个超出新结果集的 offset 上，
+    // 看起来像「没有匹配的问题」。
+    qaOffset = 0;
+    qaFilter = { severity: $("qaSev").value, code: $("qaCode").value, q: $("qaQ").value };
+    loadQa();
+  };
+  $("qaSev").value = qaFilter.severity; $("qaCode").value = qaFilter.code; $("qaQ").value = qaFilter.q;
+  $("qaSev").addEventListener("change", trigger);
+  $("qaCode").addEventListener("change", trigger);
+  let timer; $("qaQ").addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(trigger, 250); });
+}
+
+async function loadQa() {
+  const qs = new URLSearchParams();
+  if (qaFilter.severity) qs.set("severity", qaFilter.severity);
+  if (qaFilter.code) qs.set("code", qaFilter.code);
+  if (qaFilter.q) qs.set("q", qaFilter.q);
+  // 服务端一直支持 limit/offset，前端从来没传过 —— 真机 2936 条里第 201 条
+  // 之后在 UI 上根本够不着，而且页脚还写着「用筛选缩小范围」，像是设计如此。
+  qs.set("limit", String(QA_PAGE));
+  qs.set("offset", String(qaOffset));
+  const payload = await api(`/api/runs/${encodeURIComponent(selectedRun)}/qa?${qs}`);
+  if (!payload.available) { $("qaBody").innerHTML = unavailable(payload); $("qaCount").textContent = ""; return; }
+  $("qaCount").textContent = `${num(payload.total)} 条`;
+  if (!payload.issues.length) {
+    $("qaBody").innerHTML = qaOffset
+      ? `<div class="empty">这一页没有内容，回到第一页看看</div>${qaPager(payload)}`
+      : `<div class="empty">没有匹配的问题</div>`;
+    bindQaPager(payload);
+    return;
+  }
+  $("qaBody").innerHTML = `<div class="scroll tall"><table>
+    <thead><tr><th>严重度</th><th>类别</th><th>来源</th><th>资源</th><th>说明</th></tr></thead>
+    <tbody>${payload.issues.map((i) => `<tr>
+      <td class="sev-${esc(i.severity)}">${esc(i.severity)}</td>
+      <td>${esc(i.code)}<div class="muted" style="font-size:12px">${esc(i.label)}</div></td>
+      <td>${provenanceChip(i.provenance)}</td>
+      <td class="mono">${esc(i.relative_path || "—")}
+        <div class="muted">${esc(i.stable_identity || "")}</div></td>
+      <td>${esc(i.message)}${Object.keys(i.details || {}).length
+        ? `<div class="mono muted">${esc(JSON.stringify(i.details))}</div>` : ""}</td>
+    </tr>`).join("")}</tbody></table></div>${qaPager(payload)}`;
+  bindQaPager(payload);
+}
+
+// machine = 本次运行自己产出，零容忍；其余都是搬运来的存量债。
+function provenanceChip(provenance) {
+  const value = provenance || "unknown";
+  if (value === "machine") return `<span class="chip err">本次新译</span>`;
+  if (value === "human_reviewed") return `<span class="chip ok">人工定稿</span>`;
+  return `<span class="chip" title="${esc(value)}">存量</span>`;
+}
+
+function qaPager(payload) {
+  const from = payload.offset + 1, to = payload.offset + payload.issues.length;
+  const hasPrev = payload.offset > 0, hasNext = to < payload.total;
+  if (!hasPrev && !hasNext) return "";
+  return `<div class="rowflex" style="margin-top:10px;align-items:center">
+      <button class="secondary" id="qaPrev" ${hasPrev ? "" : "disabled"}>上一页</button>
+      <button class="secondary" id="qaNext" ${hasNext ? "" : "disabled"}>下一页</button>
+      <span class="muted" style="font-size:12px">第 ${num(from)}–${num(to)} 条，共 ${num(payload.total)} 条</span>
+    </div>`;
+}
+
+function bindQaPager(payload) {
+  const prev = $("qaPrev"), next = $("qaNext");
+  if (prev) prev.addEventListener("click", () => { qaOffset = Math.max(0, qaOffset - QA_PAGE); loadQa(); });
+  if (next) next.addEventListener("click", () => { qaOffset += QA_PAGE; loadQa(); });
+}
+
+/* ----------------------------------------------------------------- review */
+
+let review = { view: "glossary", session: null, rows: [], selected: null, detail: null,
+               busy: false };
+
+function reviewApi(path, params) {
+  const qs = new URLSearchParams(params || {});
+  return api(`/api/runs/${encodeURIComponent(selectedRun)}/review/${path}?${qs}`);
+}
+
+async function renderReview() {
+  const body = $("tabBody");
+  try {
+    review.session = await reviewApi("session");
+  } catch (err) {
+    body.innerHTML = `<div class="empty">审查视图不可用：${esc(err.message)}</div>`;
+    return;
+  }
+  if (!review.session.available) { body.innerHTML = unavailable(review.session); return; }
+  body.innerHTML = reviewShell();
+  bindReviewShell();
+  await loadReviewQueue();
+}
+
+function reviewShell() {
+  const c = review.session.counters;
+  const inheritedVersion = detail.task?.version
+    || detail.artifact?.metadata?.release?.version
+    || initial.project.game_version
+    || "";
+  const views = [
+    ["glossary", `术语 ${num(c.glossary_clusters)} 个决策`],
+    ["groups", `同源多译 ${num(c.same_source_groups)} 组`],
+    ["empty_translation", "空译文"],
+    ["placeholder_mismatch", "占位符不符"],
+  ];
+  return `<div class="note">
+      ${esc(review.session.notes.authority)}<br>
+      面板提供 QA 缺陷的<b>单人定点修复</b>：编辑落本地 TM 并留完整审计。
+      它不组织人工审核流程 —— 没有审核队列、任务分发或多人审批；
+      批量人工翻译与校对统一在 ParaTranz（M5）完成。
+    </div>
+    <div class="note">
+      <b>应用修复并重新构建</b>：创建新的不可变子运行；父运行没有 checkpoint 时自动沿谱系
+      回溯最近的成功机器结果，
+      只重试仍未解决或源文已变化的词条，并重新执行完整 QualityGate。
+      <div class="rowflex" style="margin-top:10px">
+        <label>子运行 run_id（留空自动生成）
+          <input id="rebuildRunId" autocomplete="off" placeholder="自动生成">
+        </label>
+        <label>目标游戏版本（发布前确认未占用）
+          <input id="rebuildVersion" autocomplete="off" value="${esc(inheritedVersion)}"
+            placeholder="例如 1.44.0.2，不要填写前导 v">
+        </label>
+        <label>构建模式
+          <select id="rebuildMode"><option value="preview">preview</option><option value="release">release</option></select>
+        </label>
+        <button class="action" id="launchRebuild" type="button">应用修复并重新构建</button>
+        <span class="chip" id="rebuildMsg"></span>
+      </div>
+      <span class="muted">目标版本默认继承父运行但可在本次重建中修改；源路径与 .env 仍从父运行快照继承。版本变化只影响制品、Manifest、tag 和上传目录，不会让已安全复用的词条重新调用 Provider。</span>
+    </div>
+    <div class="rowflex" style="margin:12px 0">
+      ${views.map(([k, label]) =>
+        `<button class="secondary" data-rview="${k}" ${k === review.view ? 'aria-selected="true"' : ""}
+          >${esc(label)}</button>`).join("")}
+      <span class="grow"></span>
+      <span class="chip" id="reviewCounters"></span>
+    </div>
+    <div id="reviewMsg"></div>
+    <div class="reviewgrid">
+      <div><div class="queue" id="reviewQueue"><div class="empty">载入中…</div></div>
+        <div class="keys" id="reviewKeys"></div></div>
+      <div id="reviewDetail"><div class="empty">从左侧选一条</div></div>
+    </div>`;
+}
+
+function bindReviewShell() {
+  document.querySelectorAll("[data-rview]").forEach((b) =>
+    b.addEventListener("click", async () => {
+      review.view = b.dataset.rview; review.selected = null; review.detail = null;
+      document.querySelectorAll("[data-rview]").forEach((o) =>
+        o.setAttribute("aria-selected", String(o.dataset.rview === review.view)));
+      await loadReviewQueue();
+    }));
+  $("launchRebuild").addEventListener("click", launchRebuild);
+  updateReviewCounters();
+}
+
+async function launchRebuild() {
+  const button = $("launchRebuild"), message = $("rebuildMsg");
+  const parentRunId = selectedRun;
+  button.disabled = true;
+  message.className = "chip warn";
+  message.textContent = "正在创建子运行…";
+  try {
+    const task = await postApi("/api/tasks/rebuild", {
+      parent_run_id: parentRunId,
+      run_id: $("rebuildRunId").value.trim() || undefined,
+      version: $("rebuildVersion").value.trim(),
+      mode: $("rebuildMode").value,
+    });
+    message.className = "chip ok";
+    message.textContent = `子运行 ${task.run_id} 已入队，目标版本 ${task.version}`;
+    tasks = (await api("/api/tasks")).tasks;
+    renderTaskStatus();
+    activeTab = "live";
+    await refresh();
+    await selectRun(task.run_id);
+  } catch (err) {
+    message.className = "chip err";
+    message.textContent = err.message;
+    button.disabled = false;
+  }
+}
+
+function updateReviewCounters() {
+  const node = $("reviewCounters");
+  if (!node || !review.session) return;
+  const c = review.session.counters;
+  node.innerHTML = `已定 <b>${num(c.committed)}</b> · 草稿 <b>${num(c.draft)}</b>`
+    + ` · 待议 <b>${num(c.deferred)}</b> · 跳过 <b>${num(c.skipped)}</b>`;
+}
+
+function reviewNote(text, kind) {
+  const node = $("reviewMsg");
+  if (node) node.innerHTML = text
+    ? `<div class="note" style="border-color:var(--${kind || "border"})">${esc(text)}</div>` : "";
+}
+
+async function loadReviewQueue() {
+  const box = $("reviewQueue");
+  if (!box) return;
+  box.innerHTML = `<div class="empty">载入中…</div>`;
+  const c = review.session.counters;
+  if (review.view === "glossary") {
+    review.rows = (await reviewApi("glossary")).clusters;
+    box.innerHTML = review.rows.length ? review.rows.map((x, i) => `
+      <div class="qitem" data-idx="${i}" ${i === 0 ? 'aria-selected="true"' : ""}>
+        <div class="mono">${esc(x.source_term)} → ${esc(x.required_target)}</div>
+        <div class="src">${num(x.violation_count)} 条违规 · ${num(x.file_count)} 个文件
+          ${x.protected ? ' · <span class="chip warn">人工定稿术语</span>' : ""}</div>
+      </div>`).join("") : `<div class="empty">没有术语违规</div>`;
+    $("reviewKeys").innerHTML =
+      `本队列把 <b>${num(c.glossary_violations)}</b> 条违规压成 <b>${num(review.rows.length)}</b>`
+      + ` 个术语决策。<b>这是唯一能解发布阻断的队列。</b>`;
+  } else if (review.view === "groups") {
+    review.rows = (await reviewApi("groups", { limit: 200 })).groups;
+    box.innerHTML = review.rows.length ? review.rows.map((g, i) => `
+      <div class="qitem${g.resolved ? " done" : ""}" data-idx="${i}" ${i === 0 ? 'aria-selected="true"' : ""}>
+        <div class="src">${esc(g.source.slice(0, 90))}</div>
+        ${g.resolved
+          ? `<div class="var">✓ 已统一为 <b>${esc(g.committed_translation || "")}</b>
+              <span class="muted">${num(g.member_count)} 条</span></div>`
+          : g.variants.slice(0, 2).map((v, n) =>
+              `<div class="var"><kbd>${n + 1}</kbd> ${esc(v.translation || "（空）")}
+                <span class="muted">×${v.count}</span></div>`).join("")
+            + (g.variant_count > 2 ? `<div class="muted" style="font-size:12px">还有 ${g.variant_count - 2} 种译法</div>` : "")}
+        ${!g.resolved && g.committed_members
+          ? `<span class="chip err">只落表 ${num(g.committed_members)}/${num(g.member_count)} 条</span>` : ""}
+        ${!g.resolved && g.state !== "pending" ? `<span class="chip">${esc(g.state)}</span>` : ""}
+      </div>`).join("") : `<div class="empty">没有同源多译</div>`;
+    $("reviewKeys").innerHTML =
+      `共 <b>${num(c.same_source_groups)}</b> 组：有唯一最高频译法 <b>${num(c.groups_with_plurality)}</b>`
+      + ` · 归一化可坍缩 <b>${num(c.groups_normalized_collapse)}</b>`
+      + ` · 其余 <b>${num(c.groups_needing_case_by_case)}</b> 组需逐条判断。<br>`
+      + `<div class="rowflex" style="margin:8px 0">`
+      + `<input id="majorityReason" placeholder="批量同步理由（必填）" style="flex:1 1 220px">`
+      + `<button class="action" id="syncMajorities" ${c.groups_with_plurality ? "" : "disabled"}>`
+      + `一键按多数派统一落表</button><span class="chip" id="majorityMsg"></span></div>`
+      + `<span class="muted">处理全部未解决组：非空译文中出现次数唯一最高者胜出，不设比例门槛；空译文一并补齐，并列第一的组跳过。</span><br>`
+      + `<kbd>j</kbd>/<kbd>k</kbd> 上下 · <kbd>1</kbd>..<kbd>9</kbd> 选译法 · `
+      + `<kbd>s</kbd> 跳过 · <kbd>d</kbd> 待议<br>`
+      + `<span style="color:var(--warn)">${esc(review.session.notes.same_source)}</span>`;
+    $("syncMajorities")?.addEventListener("click", syncMajorities);
+  } else {
+    review.rows = (await reviewApi("units", { code: review.view, limit: 200 })).units;
+    const doneCount = review.rows.filter((u) => u.resolved).length;
+    box.innerHTML = review.rows.length ? review.rows.map((u, i) => `
+      <div class="qitem${u.resolved ? " done" : ""}" data-idx="${i}" ${i === 0 ? 'aria-selected="true"' : ""}>
+        <div class="mono">${esc(u.relative_path)} · ${esc(u.logical_key)}</div>
+        <div class="src">${esc((u.source_text || "").slice(0, 90))}</div>
+        ${u.resolved
+          ? `<div class="var">✓ ${esc(u.committed_translation || "")}</div>` : ""}
+      </div>`).join("") : `<div class="empty">没有这类问题</div>`;
+    $("reviewKeys").innerHTML =
+      `已修复 <b>${num(doneCount)}</b>/${num(review.rows.length)} 条，已修复的排在列表底部。<br>`
+      + `本地重新校验不调用模型，也不产生费用。`;
+  }
+  box.querySelectorAll(".qitem").forEach((el) =>
+    el.addEventListener("click", () => selectReviewRow(Number(el.dataset.idx))));
+  if (review.rows.length) await selectReviewRow(0);
+  else $("reviewDetail").innerHTML = `<div class="empty">这个队列是空的</div>`;
+}
+
+async function syncMajorities() {
+  const reason = $("majorityReason").value.trim();
+  if (!reason) { reviewNote("请填写批量同步理由 —— 每个组的决策都会进入审计日志。", "warn"); return; }
+  const button = $("syncMajorities"), message = $("majorityMsg");
+  button.disabled = true;
+  message.className = "chip warn";
+  message.textContent = "正在同步…";
+  try {
+    const result = await postApi("/api/review/unify-majorities", {
+      run_id: selectedRun,
+      reason,
+      expected_log_revision: review.session.log_revision,
+    });
+    const complete = result.groups_incomplete === 0;
+    reviewNote(
+      `多数派同步：完成 ${result.groups_completed}/${result.groups_eligible} 个可判定组，`
+        + `写入 ${result.items_written}/${result.items_requested} 个坐标。`
+        + (result.groups_skipped_tied ? ` 并列跳过 ${result.groups_skipped_tied} 组。` : "")
+        + (complete ? "" : " 存在受保护或校验失败的组，请逐组查看。"),
+      complete ? "ok" : "warn",
+    );
+    review.session = await reviewApi("session");
+    await loadReviewQueue();
+  } catch (err) {
+    message.className = "chip err";
+    message.textContent = err.message;
+    button.disabled = false;
+  }
+}
+
+async function selectReviewRow(index) {
+  review.selected = index;
+  document.querySelectorAll("#reviewQueue .qitem").forEach((el) =>
+    el.setAttribute("aria-selected", String(Number(el.dataset.idx) === index)));
+  const row = review.rows[index];
+  if (!row) return;
+  if (review.view === "glossary") { renderClusterDetail(row); return; }
+  const identity = review.view === "groups"
+    ? row.members[0].stable_identity : row.stable_identity;
+  review.detail = await reviewApi("unit", { stable_identity: identity });
+  if (review.view === "groups") renderGroupDetail(row);
+  else renderUnitDetail(review.detail);
+}
+
+function highlight(text, spans, cls) {
+  if (!spans || !spans.length) return esc(text);
+  let out = "", cursor = 0;
+  for (const span of spans) {
+    if (span.start < cursor) continue;
+    out += esc(text.slice(cursor, span.start));
+    out += `<mark class="${cls}">${esc(text.slice(span.start, span.end))}</mark>`;
+    cursor = span.end;
+  }
+  return out + esc(text.slice(cursor));
+}
+
+function visibleBreaks(text) {
+  return esc(text).replace(/\r\n|\r|\n/g, (value) =>
+    `<span class="newline-marker" title="${value === "\r\n" ? "CRLF" : value === "\r" ? "CR" : "LF"}">↵</span>\n`);
+}
+
+function highlightVisible(text, spans, cls) {
+  if (!spans || !spans.length) return visibleBreaks(text);
+  let out = "", cursor = 0;
+  for (const span of spans) {
+    if (span.start < cursor) continue;
+    out += visibleBreaks(text.slice(cursor, span.start));
+    out += `<mark class="${cls}">${visibleBreaks(text.slice(span.start, span.end))}</mark>`;
+    cursor = span.end;
+  }
+  return out + visibleBreaks(text.slice(cursor));
+}
+
+function lineBreakCount(text) {
+  return (String(text || "").match(/\r\n|\r|\n/g) || []).length;
+}
+
+function renderClusterDetail(cluster) {
+  const firstFile = (cluster.files || [])[0] || "";
+  $("reviewDetail").innerHTML = `
+    <h3 style="margin:0 0 10px;font-size:14px">${esc(cluster.source_term)} → ${esc(cluster.required_target)}</h3>
+    <dl class="kv">
+      <dt>匹配方式</dt><dd class="mono">${esc(cluster.match_mode)}</dd>
+      <dt>当前 scope</dt><dd class="mono">${esc(cluster.scope || "全部")}</dd>
+      <dt>已排除</dt><dd class="mono">${esc((cluster.exclude_scope || []).join(", ") || "无")}</dd>
+      <dt>违规</dt><dd>${num(cluster.violation_count)} 条，分布在 ${num(cluster.file_count)} 个文件</dd>
+      <dt>文件</dt><dd class="mono">${esc((cluster.files || []).slice(0, 12).join(", "))}</dd>
+    </dl>
+    <div class="note">${cluster.protected
+      ? "这是 human + reviewed 的术语，受 G01 绝对保护；下方排除操作会自动走备份、diff 与审计维护路径。"
+      : "改术语会改变全部违规的判据基准，改完只对本术语覆盖的词条重判。"}<br>
+      多义词误报的正解是给术语加 <span class="mono">exclude_scope</span>，
+      <b>不是</b>把正确的译文改错 —— 实测这类误报占术语违规的 23%。</div>
+    <div class="rowflex" style="margin-top:10px">
+      <button class="secondary" id="clusterRecheck">按当前译文重判本术语</button>
+    </div>
+    <div class="note" style="margin-top:10px">
+      <b>按语境排除该术语</b>：填写相对于源目录的文件路径或 glob。建议先用精确文件名；
+      面板拒绝 <span class="mono">*</span> 等全局排除。
+      <datalist id="clusterFiles">${(cluster.files || []).map((path) =>
+        `<option value="${esc(path)}"></option>`).join("")}</datalist>
+      <div class="rowflex" style="margin-top:8px">
+        <input id="clusterExcludePath" list="clusterFiles" value="${esc(firstFile)}"
+          placeholder="例如 comp7.mo 或 ui/ranks/**" style="flex:1 1 240px">
+        <input id="clusterExcludeReason" placeholder="排除理由（必填）" style="flex:1 1 220px">
+        <button class="action" id="clusterExclude">排除指定路径</button>
+      </div>
+      <span class="muted">只修改当前术语的 exclude_scope；旧 QA 报告保持不变，需增量重建后才有权威结论。</span>
+    </div>
+    <div id="clusterResult"></div>`;
+  $("clusterRecheck").addEventListener("click", async () => {
+    const units = await reviewApi("units", { code: "glossary_violation", limit: 500 });
+    const edits = {};
+    units.units.filter((u) => cluster.violation_identities.includes(u.stable_identity))
+      .forEach((u) => { edits[u.stable_identity] = u.translation || ""; });
+    const result = await postApi("/api/review/recheck", {
+      run_id: selectedRun, edits, scope: `cluster:${cluster.cluster_id}`,
+    });
+    const remaining = result.verdicts.filter((v) => v.remaining.includes("glossary_violation"));
+    $("clusterResult").innerHTML = `<div class="note">
+      重判 ${num(result.verdicts.length)} 条，仍违规 <b>${num(remaining.length)}</b> 条。
+      <span class="muted">此结果不构成发布结论（authoritative=false）。</span></div>`;
+  });
+  $("clusterExclude").addEventListener("click", async () => {
+    const path = $("clusterExcludePath").value.trim();
+    const reason = $("clusterExcludeReason").value.trim();
+    if (!path || !reason) {
+      reviewNote("请填写排除路径与理由。", "warn");
+      return;
+    }
+    await runReviewAction(() => postApi("/api/review/glossary-exclude", {
+      run_id: selectedRun,
+      cluster_id: cluster.cluster_id,
+      path_glob: path,
+      reason,
+      expected_log_revision: review.session.log_revision,
+    }));
+  });
+}
+
+function renderDiff(ops) {
+  if (!ops || !ops.length) return "";
+  const body = ops.map((op) => op.op === "equal" ? esc(op.text)
+    : op.op === "insert" ? `<ins>${esc(op.text)}</ins>`
+    : `<del>${esc(op.text)}</del>`).join("");
+  return `<div class="difftext" style="margin-top:6px">${body}</div>`;
+}
+
+function renderGroupDetail(group) {
+  $("reviewDetail").innerHTML = `
+    <div class="mono" style="margin-bottom:8px">${esc(group.source)}</div>
+    ${group.resolved ? `<div class="note" style="border-color:var(--ok)">
+      ✓ 这一组已统一为 <b>${esc(group.committed_translation || "")}</b>，
+      ${num(group.member_count)} 个成员全部落表。再次统一会覆盖它。</div>` : ""}
+    ${!group.resolved && group.committed_members ? `<div class="note" style="border-color:var(--err)">
+      只有 ${num(group.committed_members)}/${num(group.member_count)} 个成员落了表 ——
+      剩下的下一次运行会被重译出新的译法。请重新统一。</div>` : ""}
+    <div class="scroll short"><table><thead><tr><th>译法</th><th>条数</th><th>采纳</th></tr></thead>
+      <tbody>${group.variants.map((v, i) => `<tr>
+        <td>${esc(v.translation || "（空译文）")}</td><td>${num(v.count)}</td>
+        <td><button class="action" data-unify="${i}">统一为此</button></td>
+      </tr>`).join("")}</tbody></table></div>
+    <div class="note">统一会为组内<b>全部 ${num(group.member_count)} 个成员</b>各写一行${
+      group.has_empty_members ? "（含空译文成员 —— 它不在 QA 记录里，漏掉就只统一一半）" : ""}。
+      只写一条指望同源传播在真机上不成立。</div>
+    <label style="display:block;margin-top:10px">自定义译文
+      <textarea id="groupCustom" placeholder="也可以写一个都不在列表里的译法"></textarea></label>
+    <div class="rowflex" style="margin-top:8px">
+      <input id="groupReason" placeholder="定稿理由（必填）" style="flex:1 1 220px">
+      <button class="action" id="groupCustomApply">用自定义译文统一</button>
+      <button class="secondary" id="groupSkip">跳过</button>
+      <button class="secondary" id="groupDefer">待议</button>
+    </div>`;
+  const unify = async (text) => {
+    const reason = $("groupReason").value.trim();
+    if (!reason) { reviewNote("请填写定稿理由 —— 它会进决策日志。", "warn"); return; }
+    await runReviewAction(() => postApi("/api/review/unify", {
+      run_id: selectedRun, group_id: group.group_id, translation: text, reason,
+      expected_log_revision: review.session.log_revision,
+    }));
+  };
+  document.querySelectorAll("[data-unify]").forEach((b) =>
+    b.addEventListener("click", () => unify(group.variants[Number(b.dataset.unify)].translation)));
+  $("groupCustomApply").addEventListener("click", () => unify($("groupCustom").value));
+  $("groupSkip").addEventListener("click", () => markReview(group.group_id, "skip"));
+  $("groupDefer").addEventListener("click", () => markReview(group.group_id, "defer"));
+}
+
+function renderUnitDetail(unit) {
+  if (!unit) return;
+  const editText = unit.resolved ? unit.committed_translation : (unit.translation || "");
+  $("reviewDetail").innerHTML = `
+    <dl class="kv">
+      <dt>资源</dt><dd class="mono">${esc(unit.relative_path)} · ${esc(unit.logical_key)}</dd>
+      <dt>来源</dt><dd>${provenanceChip(unit.provenance)}</dd>
+      <dt>问题</dt><dd>${(unit.codes || []).map((x) => `<span class="chip err">${esc(x)}</span>`).join(" ")}</dd>
+    </dl>
+    <div style="margin:10px 0">
+      <div class="muted" style="font-size:12px">源文（占位符已高亮；<span class="newline-marker">↵</span> 表示显式换行）</div>
+      <div class="mono visible-text" style="padding:8px;border:1px solid var(--border);border-radius:8px">
+        ${highlightVisible(unit.source_text, unit.placeholder_spans, "hl-ph")}</div>
+      ${(unit.glossary_spans || []).length ? `<div style="margin-top:6px;font-size:12px">
+        术语：${unit.glossary_spans.map((s) =>
+          `<span class="chip ${s.satisfied ? "ok" : "err"}">${esc(s.matched)} → ${esc(s.required_target)}</span>`
+        ).join(" ")}</div>` : ""}
+    </div>
+    ${unit.resolved ? `<div class="note" style="border-color:var(--ok)">
+      ✓ 这条已经落表。下面回显的是<b>你定稿的译文</b>，不是运行时的原值。
+      ${renderDiff(unit.diff)}</div>` : ""}
+    <label style="display:block">译文
+      <textarea id="unitText">${esc(editText)}</textarea></label>
+    <div class="muted" id="lineBreakSummary" style="font-size:12px;margin-top:3px">
+      换行数量：源文 ${num(lineBreakCount(unit.source_text))} · 译文 ${num(lineBreakCount(editText))}
+    </div>
+    <div class="rowflex" style="margin-top:8px">
+      <input id="unitReason" placeholder="修改理由（必填）" style="flex:1 1 200px">
+      <button class="secondary" id="unitCheck">本地重新校验</button>
+      <button class="action" id="unitCommit">${unit.resolved ? "再次落表" : "落表"}</button>
+      <button class="secondary" id="unitDraft">存草稿</button>
+    </div>
+    <div id="unitResult"></div>`;
+  $("unitText").addEventListener("input", () => {
+    $("lineBreakSummary").textContent =
+      `换行数量：源文 ${lineBreakCount(unit.source_text)} · 译文 ${lineBreakCount($("unitText").value)}`;
+  });
+  $("unitCheck").addEventListener("click", async () => {
+    const result = await postApi("/api/review/recheck", {
+      run_id: selectedRun, edits: { [unit.stable_identity]: $("unitText").value },
+    });
+    const v = result.verdicts[0] || { fixed: [], remaining: [], introduced: [] };
+    $("unitResult").innerHTML = `<div class="note">
+      已消解 <b>${esc(v.fixed.join(", ") || "—")}</b> · 仍存在 <b>${esc(v.remaining.join(", ") || "—")}</b>
+      · <span style="color:var(--err)">新引入 ${esc(v.introduced.join(", ") || "—")}</span>
+      ${v.rewritten_by_rules ? `<br>注意：规则改写了译文，实际入库的是
+        <span class="mono">${esc(v.judged_text)}</span>` : ""}
+      <br><span class="muted">未评估：${esc(result.not_evaluated.join(" / "))} —— 这不是发布结论。</span></div>`;
+  });
+  $("unitCommit").addEventListener("click", async () => {
+    const reason = $("unitReason").value.trim();
+    if (!reason) { reviewNote("请填写修改理由 —— 它会进决策日志。", "warn"); return; }
+    await runReviewAction(() => postApi("/api/review/commit", {
+      run_id: selectedRun, reason,
+      edits: { [unit.stable_identity]: $("unitText").value },
+      expected_log_revision: review.session.log_revision,
+    }));
+  });
+  $("unitDraft").addEventListener("click", () =>
+    markReview(unit.stable_identity, "draft", $("unitText").value));
+}
+
+async function markReview(targetId, action, translation) {
+  await runReviewAction(() => postApi("/api/review/decisions", {
+    run_id: selectedRun,
+    items: [{ target_id: targetId, action, translation }],
+    expected_log_revision: review.session.log_revision,
+  }));
+}
+
+async function runReviewAction(fn) {
+  if (review.busy) return;
+  review.busy = true;
+  try {
+    const result = await fn();
+    // written < requested 一律按错误呈现，绝不显示「已落表」。
+    if (result.complete === false) {
+      const blocked = (result.guarded || []).map((g) => g.reason).join("；");
+      reviewNote(`只写入 ${result.written}/${result.requested} 条，未完成。${blocked}`, "err");
+    } else if (typeof result.written === "number") {
+      reviewNote(`已落表 ${result.written} 条。`, "ok");
+    } else {
+      reviewNote("已记录。", "ok");
+    }
+    review.session = await reviewApi("session");
+    updateReviewCounters();
+    await loadReviewQueue();
+  } catch (err) {
+    reviewNote(err.message, "err");
+  } finally {
+    review.busy = false;
+  }
+}
+
+document.addEventListener("keydown", (event) => {
+  if (activeTab !== "review" || review.view !== "groups") return;
+  if (/^(INPUT|TEXTAREA)$/.test(document.activeElement?.tagName || "")) return;
+  const index = review.selected ?? 0;
+  if (event.key === "j") selectReviewRow(Math.min(index + 1, review.rows.length - 1));
+  else if (event.key === "k") selectReviewRow(Math.max(index - 1, 0));
+  else if (event.key === "s") $("groupSkip")?.click();
+  else if (event.key === "d") $("groupDefer")?.click();
+  else if (/^[1-9]$/.test(event.key)) document.querySelector(`[data-unify="${Number(event.key) - 1}"]`)?.click();
+  else return;
+  event.preventDefault();
+});
+
+// 2000 个决策是跨天的作业。草稿虽然存在服务端，但未保存的输入框内容仍会丢。
+window.addEventListener("beforeunload", (event) => {
+  if (activeTab === "review" && (review.session?.counters?.draft || 0)) {
+    event.preventDefault();
+    event.returnValue = "";
+  }
+});
+
+/* --------------------------------------------------------------------- tm */
+
+function renderTm() {
+  const tm = overview?.tm, base = overview?.legacy_baseline;
+  if (!tm?.available) { $("tmPanel").innerHTML = unavailable(tm); }
+  else {
+    const g = (obj) => Object.entries(obj || {}).map(([k, v]) =>
+      `<span class="chip">${esc(k)} <b>${num(v)}</b></span>`).join(" ") || "—";
+    $("tmPanel").innerHTML = `<dl class="kv">
+      <dt>权威源</dt><dd>${tm.authoritative
+        ? `<span class="chip warn">已切换为权威</span>`
+        : `<span class="chip ok">影子库（非权威）</span>`}</dd>
+      <dt>条目总数</dt><dd>${num(tm.total)}（正式 ${num(tm.formal)}）</dd>
+      <dt>来源</dt><dd>${g(tm.by_origin)}</dd>
+      <dt>审核状态</dt><dd>${g(tm.by_review_state)}</dd>
+      <dt>质量分类</dt><dd>${g(tm.by_classification)}</dd>
+      <dt>数据库</dt><dd class="mono">${esc(tm.database)}</dd>
+    </dl>
+    ${tm.legacy_sync?.length ? `<h3 style="font-size:13px;margin:14px 0 6px">影子同步记录</h3>
+      <div class="scroll short"><table><thead><tr><th>源文件</th><th>哈希</th><th>导入</th><th>时间</th></tr></thead>
+      <tbody>${tm.legacy_sync.map((s) => `<tr><td class="mono">${esc(s.source_path)}</td>
+        <td class="mono">${esc(String(s.source_hash).slice(0, 12))}…</td>
+        <td>${num(s.imported_count)}</td><td class="mono">${esc(s.synced_at)}</td></tr>`).join("")}
+      </tbody></table></div>` : ""}`;
+  }
+  if (base?.available) {
+    const lv = base.levels || {};
+    $("tmPanel").insertAdjacentHTML("beforeend",
+      `<h3 style="font-size:13px;margin:14px 0 6px">M0 存量分类基线</h3>
+       <div class="rowflex">
+         <span class="chip ok">clean <b>${num(lv.clean)}</b></span>
+         <span class="chip warn">suspect <b>${num(lv.suspect)}</b></span>
+         <span class="chip err">quarantined <b>${num(lv.quarantined)}</b></span>
+         <span class="chip">总计 <b>${num(base.total)}</b></span>
+       </div>
+       <div class="note">quarantined 不参与命中、不进 Prompt 参考、不参与全局收敛（§12.4）。</div>`);
+  }
+}
+
+/* ------------------------------------------------------------------- boot */
+
+function renderHeader() {
+  const p = overview.project;
+  // 多目录项目（正式服/测试服）一次只看一个变体。不标出来的话，面板看起来就是
+  // 「这个项目只有这些运行」，而不是「你正在看 live，pts 的运行在另一个目录」。
+  const variantChip = p.active_variant
+    ? ` · <span class="mono">${esc(p.active_variant)}</span>` +
+      (p.variants?.length > 1
+        ? `<span class="muted" style="font-size:12px"> （共 ${p.variants.length} 个资源目录，`
+          + `切换用 <span class="mono">--variant</span>）</span>`
+        : "")
+    : "";
+  $("projectChip").innerHTML = `<b>${esc(p.name)}</b> ${esc(p.source_locale)} → ${esc(p.target_locale)}
+    · ${esc(p.workflow_mode)}${variantChip}`;
+  const tm = overview.tm;
+  $("tmChip").className = "chip " + (tm?.available ? (tm.authoritative ? "warn" : "ok") : "");
+  $("tmChip").textContent = tm?.available
+    ? (tm.authoritative ? "TM 已是权威源" : "TM 影子库（非权威）") : "TM 未创建";
+}
+
+async function refresh() {
+  try {
+    overview = await api("/api/overview");
+    renderHeader(); renderTm();
+    runs = (await api("/api/runs")).runs;
+    tasks = (await api("/api/tasks")).tasks;
+    renderTaskStatus();
+    if (!selectedRun && runs.length) { await selectRun(runs[0].run_id); }
+    else {
+      renderRuns();
+      if (selectedRun) {
+        detail = await api(`/api/runs/${encodeURIComponent(selectedRun)}`);
+        // 审查视图不随轮询重绘：里面有未提交的编辑与光标位置。
+        if (TAB_REBUILD[activeTab] !== false) await renderTab();
+        else updateReviewCounters();
+      }
+    }
+    renderPipeline();
+    $("clock").textContent = "更新于 " + new Date().toLocaleTimeString("zh-CN");
+  } catch (err) {
+    $("clock").textContent = "刷新失败：" + err.message;
+  }
+}
+
+Promise.all([api("/api/task-profiles"), api("/api/overview")]).then(([profiles, initial]) => {
+  taskProfiles = profiles.profiles; overview = initial;
+  $("taskVersion").value = initial.project.game_version || "";
+  $("taskSource").value = initial.paths.source?.path || "";
+  $("taskDotenv").placeholder = initial.environment?.dotenv_files?.length
+    ? `自动：${initial.environment.dotenv_files.join(", ")}`
+    : "未自动发现；可填写 .env 文件路径";
+  renderTaskProfiles(); bindTaskForm();
+  if (!profiles.enabled) {
+    $("saveProfile").disabled = true; $("preflightTask").disabled = true; $("launchTask").disabled = true;
+    $("taskStatus").textContent = "当前绑定地址不是回环地址，任务写接口已自动关闭；此面板仅展示运行状态。";
+  }
+  refresh();
+}).catch((err) => { $("clock").textContent = "初始化失败：" + err.message; });
+setInterval(() => { if ($("autoRefresh").checked) refresh(); }, 5000);
+</script>
+</body>
+</html>

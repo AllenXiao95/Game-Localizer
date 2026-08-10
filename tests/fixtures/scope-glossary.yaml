@@ -1,0 +1,39 @@
+schema_version: 1
+terms:
+  - source: Золото
+    target: 金币
+    source_locale: ru-RU
+    target_locale: zh-Hans
+    match_mode: word
+    exclude_scope:
+      - vehicle_customization.mo
+      - dogtags.mo
+      - badge.mo
+      - comp7.mo
+      - achievements.mo
+      - achievements_page.mo
+      - tips.mo
+    status: reviewed
+    provenance: human
+  - source: Серебро
+    target: 银币
+    source_locale: ru-RU
+    target_locale: zh-Hans
+    match_mode: word
+    exclude_scope:
+      - vehicle_customization.mo
+      - dogtags.mo
+      - badge.mo
+      - comp7.mo
+      - achievements.mo
+      - achievements_page.mo
+      - tips.mo
+    status: reviewed
+    provenance: human
+  - source: Чемпион
+    target: 勇士
+    source_locale: ru-RU
+    target_locale: zh-Hans
+    match_mode: word
+    status: reviewed
+    provenance: human

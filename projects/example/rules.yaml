@@ -1,0 +1,25 @@
+schema_version: 1
+
+# 显式指定源语言画像，用于检测译文中残留的连续英文单词。
+language:
+  source_profile: en
+  residue:
+    min_run: 3
+    # 允许在中文译文中原样保留的英文游戏术语。
+    exact_allowlist:
+      - HP
+      - PvP
+    mappings: {}
+    scopes: []
+
+# 可选过滤示例：命中的词条不会送模型，也不参与 QA。
+# filter_rules:
+#   - id: skip_internal_debug
+#     reason: internal developer-only text
+#     path_glob: "**/debug*.po"
+
+# 可选规范化示例：仅在确有项目级格式要求时启用。
+# normalization_rules:
+#   - id: collapse_repeated_spaces
+#     pattern: "[ ]{2,}"
+#     replacement: " "

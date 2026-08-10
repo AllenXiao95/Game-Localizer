@@ -1,0 +1,91 @@
+# Python bytecode and test/tool caches
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Conda / virtual environments
+.conda/
+conda-meta/
+.venv/
+venv/
+env/
+
+# Editors and local agent state
+/.vscode/
+/.agents/
+/.codex/
+
+# Local configuration and credentials
+/config.py
+/key.txt
+.env
+.env.*
+!.env.example
+
+# Model downloads and caches. /tokenizers is the legacy location; the canonical
+# path is /var/cache/tokenizers and is covered by /var below.
+/tokenizers/
+
+# Translation inputs, outputs, and temporary files
+/lc_messages/
+/lc_messages_previous/
+/check_lc_messages/
+
+# Local game projects may contain proprietary resources, credentials, TM data,
+# and review logs. Only the sanitized, runnable example belongs in the repository.
+/projects/*
+!/projects/example/
+!/projects/example/**
+
+/var/
+/releases/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.shadow-sync.lock
+*_tmp.po
+*.config
+*.mo.tmp
+*.json.tmp
+*.failed.json
+
+# Runtime logs and generated reports
+/changelog.txt
+/error.log
+/diff_report*.txt
+/consistency_report.json
+/comparison_full.json
+/expression_mismatches.csv
+/ui_tags_error_report.csv
+/history_tm_fixed.json
+
+# Release artifacts
+/i18n_*.zip
+/history_tm.zip
+/metadata.json
+
+# Local backups and historical snapshots
+/tm_backups/
+/glossary_backups/
+/history/
+/Archive/
+
+# ParaTranz download/export workspaces
+/paratranz_files/
+/pt_base/
+
+# Applications planned as independent projects
+/app/
+/ai-translator-core/
+
+# Legacy build artifacts
+/build/
+/dist/
+/certTools/
+
+# OS metadata
+.DS_Store
+Thumbs.db

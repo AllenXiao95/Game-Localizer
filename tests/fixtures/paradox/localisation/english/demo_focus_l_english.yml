@@ -1,0 +1,8 @@
+﻿l_english:
+ # Focus tree strings for the demo module
+ DEMO_focus_rearmament:0 "Rearmament Program"
+ DEMO_focus_rearmament_desc:1 "Our forces are in shambles. §Y$COUNTRY_ADJ$§! must rebuild before [Root.GetNameDef] loses patience.\n\nCost: £political_power£ $VALUE|*0$"
+ DEMO_focus_industry:0 "Expand the $DEMO_region_ruhr$ Works"
+ DEMO_event_title:0 "The \"Iron\" Compromise"
+ DEMO_progress_tooltip:0 "Completed $PROGRESS|%1$ of the plan"  # shown on hover
+ DEMO_placeholder_only:0 "$VALUE$"

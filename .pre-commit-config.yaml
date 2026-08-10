@@ -1,0 +1,29 @@
+# M0 退出约束一：提交前密钥扫描。
+#
+# 本仓库的 `config.py` 曾把六套生产凭据提交进版本库，且历史里仍有完整 token。
+# 「以后注意点」不是控制 —— 控制是一个会拒绝提交的钩子。
+#
+# 启用：
+#   pip install pre-commit
+#   pre-commit install
+#
+# CI 侧有等价的 secret-scan job（.github/workflows/tests.yml），因此即使有人
+# 没装钩子也拦得住；本地钩子的价值是**在密钥进入历史之前**就拦下 ——
+# 一旦提交，撤销的代价是轮换而不是 revert。
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: detect-private-key
+      - id: check-added-large-files
+        args: ["--maxkb=2048"]
+      - id: check-yaml
+        # 项目配置里有多文档与自定义标签的可能，只做基本语法检查。
+        args: ["--allow-multiple-documents"]
+      - id: end-of-file-fixer
+      - id: trailing-whitespace

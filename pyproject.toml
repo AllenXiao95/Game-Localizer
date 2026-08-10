@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "game-localizer"
+version = "0.1.0"
+description = "Game localization preprocessing, translation, QA, and publishing framework"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+dependencies = [
+  "polib>=1.2",
+  "pydantic>=1.10,<3",
+  "PyYAML>=6",
+  "typer>=0.9",
+]
+
+[project.scripts]
+localizer = "localizer.cli.main:main"
+
+[project.optional-dependencies]
+publish-r2 = ["boto3>=1.26"]
+publish-oss = ["oss2>=2.18"]
+publish-all = ["boto3>=1.26", "oss2>=2.18"]
+artifact-aes = ["pyzipper>=0.3.6"]
+tokenizer-huggingface = ["transformers>=4"]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+# 观测面板是单文件自包含页面，必须随包分发，否则 `localizer dashboard` 只能在源码树里跑。
+"localizer.web" = ["static/*.html"]

@@ -1,0 +1,118 @@
+{
+  "issues": [
+    {
+      "code": "empty_translation",
+      "details": {},
+      "message": "translation is empty",
+      "provenance": "unknown",
+      "relative_path": "c.mo",
+      "severity": "error",
+      "stable_identity": "32d3adc562ffcb4da4e0564b14edc253a7b4feedd615710ba8c4ff7d29b70a95"
+    },
+    {
+      "code": "empty_translation",
+      "details": {},
+      "message": "translation is empty",
+      "provenance": "legacy_coordinate_exact",
+      "relative_path": "menu.mo",
+      "severity": "error",
+      "stable_identity": "af22a8cc56a7ca63b3c4c9cb2bd63cd82b0bfdf6dfa2ab1b6e1f127920942ff9"
+    },
+    {
+      "code": "source_language_residue",
+      "details": {
+        "fragments": [
+          "Кириллица"
+        ],
+        "profile": "ru"
+      },
+      "message": "translation contains Cyrillic text not allowed by rules.yaml",
+      "provenance": "unknown",
+      "relative_path": "menu.mo",
+      "severity": "error",
+      "stable_identity": "883a9c962afcee40ab51874888b7cb0d24fffa2576f79a00ca7b341bab1be265"
+    },
+    {
+      "code": "placeholder_mismatch",
+      "details": {
+        "source": [
+          "%(count)s"
+        ],
+        "target": []
+      },
+      "message": "placeholder multiset differs from source",
+      "provenance": "embedded",
+      "relative_path": "menu.mo",
+      "severity": "error",
+      "stable_identity": "1b0f4f89cd5f19ee039fce0ebc45c4bd9b0b9e15b5302100b78603cfc05e6989"
+    },
+    {
+      "code": "untranslated",
+      "details": {},
+      "message": "translation is identical to source text",
+      "provenance": "machine",
+      "relative_path": "menu.mo",
+      "severity": "error",
+      "stable_identity": "5a38f22b353b19214bed7b9666bd3a43294abf07264ecd7788a1f2460354a648"
+    },
+    {
+      "code": "invalid_control_character",
+      "details": {},
+      "message": "translation contains a NUL character",
+      "provenance": "legacy_coordinate_exact",
+      "relative_path": "menu.mo",
+      "severity": "error",
+      "stable_identity": "d2f38cc1cacca1d7d629e862522b42f7911ccd2559e47e1c64faf91e13891583"
+    },
+    {
+      "code": "placeholder_variant_residue",
+      "details": {
+        "fragments": [
+          "[PH_a1b2c3d4_0]"
+        ]
+      },
+      "message": "placeholder token survived restore in a variant form",
+      "provenance": "unknown",
+      "relative_path": "menu.mo",
+      "severity": "error",
+      "stable_identity": "9d2857a8af8b3c6756161d86dc1b412364b68538f476b2977b34920ec84a7872"
+    },
+    {
+      "code": "glossary_violation",
+      "details": {
+        "required_target": "银币",
+        "source_term": "Серебро"
+      },
+      "message": "reviewed glossary target is missing: Серебро => 银币",
+      "provenance": "embedded",
+      "relative_path": "menu.mo",
+      "severity": "error",
+      "stable_identity": "edc745c512b13c196539a8ce37d029758b804b1eb692ae9e7e721ef4d59ff5ed"
+    },
+    {
+      "code": "same_source_inconsistency",
+      "details": {
+        "source": "Общий текст",
+        "translations": [
+          "译法乙",
+          "译法甲"
+        ]
+      },
+      "message": "same source text has multiple translations in this run",
+      "provenance": "unknown",
+      "relative_path": "a.mo",
+      "severity": "warning",
+      "stable_identity": "257c425af4072e5c6e47bfed1608fa2514846f393662d7b6f15329ab5ae8e5ce"
+    }
+  ],
+  "summary": {
+    "accepted_debt_count": 0,
+    "baseline_path": null,
+    "carried_error_count": 7,
+    "error_count": 8,
+    "failed_unit_count": 1,
+    "new_error_count": 1,
+    "passed": false,
+    "unaccepted_carried_count": 7
+  }
+}

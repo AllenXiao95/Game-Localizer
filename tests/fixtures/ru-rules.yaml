@@ -1,0 +1,6 @@
+schema_version: 1
+
+cyrillic:
+  exact_allowlist: []
+  mappings: {}
+  scopes: []

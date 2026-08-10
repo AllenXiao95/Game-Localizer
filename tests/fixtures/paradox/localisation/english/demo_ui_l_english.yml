@@ -1,0 +1,5 @@
+﻿l_english:
+ UI_MENU_NEW_GAME: "New Game"
+ UI_MENU_LOAD: "Load Game"
+ UI_STOCKPILE: "£manpower£ %d men in reserve (%d%% ready)"
+ UI_ALERT_LOW: "§RWarning:§! only $NUM$ divisions remain"

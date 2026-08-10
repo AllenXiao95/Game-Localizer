@@ -1,0 +1,35 @@
+msgid ""
+msgstr ""
+"Project-Id-Version: example-game 1.0\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+
+#. Basic button: msgid is the English source and an empty msgstr means untranslated.
+msgid "Start Game"
+msgstr ""
+
+#. Named placeholder: the name, type, and count must remain unchanged.
+#, python-format
+msgid "Welcome, %(player)s!"
+msgstr ""
+
+#. Context disambiguates the same source text used in different UI locations.
+msgctxt "main-menu button"
+msgid "Settings"
+msgstr ""
+
+#. Multiple printf-style placeholders may be reordered, but not removed or renamed.
+#, python-format
+msgid "Health: %(current)d/%(maximum)d HP"
+msgstr ""
+
+#. Markup and keyboard shortcuts must be preserved exactly.
+msgid "Press <b>F1</b> for help."
+msgstr ""
+
+#. Real line breaks are part of the resource and must survive translation.
+msgid "Connection lost.\nRetry?"
+msgstr ""

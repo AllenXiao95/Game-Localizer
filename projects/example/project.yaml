@@ -1,0 +1,111 @@
+schema_version: 1
+
+# 复制整个 projects/example 目录即可创建新项目；相对路径均以本文件所在目录为基准。
+project:
+  id: example-game
+  name: Example Game
+  game_version: 1.0.0
+
+paths:
+  # 待翻译资源目录。多版本/多服务器项目可改用 sources + default_variant。
+  source: ./source
+  # sources:
+  #   live: ./source/live
+  #   beta: ./source/beta
+  # default_variant: live
+  workspace: ../../var/example/workspace
+  output: ../../var/example/output
+
+# tokenizer 等可复用缓存不会写入项目目录。
+cache:
+  root: ../../var/cache
+  scope: shared
+
+environment:
+  # 从 project.yaml 所在目录向仓库根目录查找 Git 忽略的 .env。
+  auto_discover: true
+  override_existing: false
+
+languages:
+  source: en-US
+  target: zh-Hans
+
+resources:
+  adapters:
+    - type: gettext
+      # 同时支持可编辑的 PO 与编译后的 MO。
+      include:
+        - "**/*.po"
+        - "**/*.mo"
+      options:
+        # standard: msgid=源文，msgstr=译文。
+        # keyed_source: msgid=资源键，msgstr=待翻译原文（部分游戏使用）。
+        layout: standard
+        empty_source: skip
+        source_filter: all
+
+prompt:
+  template: ./prompt.md
+  # 可选背景只提供游戏语境，不应包含密钥或运行时数据。
+  background: ./background.md
+
+glossary:
+  file: ./glossary.yaml
+  # 模型发现的新术语只进入候选区，不会自动成为强制术语。
+  auto_discovery: candidate_only
+
+rules:
+  file: ./rules.yaml
+
+provider:
+  type: openai_compatible
+  # 替换成所用服务商的 OpenAI-compatible endpoint。
+  base_url: https://api.example.com/v1
+  # 这里只写环境变量名，真实密钥写入 Git 忽略的 .env。
+  api_key_env: LOCALIZER_API_KEY
+  model: provider-model-name
+  # 可选；本地 tokenizer 身份独立配置，绝不从上面的 API 模型名自动推断。
+  tokenizer:
+    type: huggingface
+    model: organization/tokenizer-repository
+    revision: pinned-revision
+    local_files_only: false
+  concurrency: 4
+  timeout_seconds: 120
+  context_window: 32768
+  max_output_tokens: 4096
+  custom_parameters: {}
+
+tm:
+  # SQLite 是运行时翻译记忆的权威数据源。
+  database: ../../var/example/localizer.sqlite
+  # 跨坐标复用只接受人工审核过的完全匹配。
+  global_exact_match: reviewed_only
+  commit_policy: quality_gate
+
+# 空配置表示 release 对新增 error 零容忍；不要在通用示例中预置历史债务。
+quality_gate: {}
+
+workflow:
+  # Dashboard 与 CLI 共用同一套本地工作流。
+  mode: local
+
+build:
+  format: zip
+  release_channel: stable
+  variant: zh-Hans
+  artifact_prefix: example-localization
+  compression: deflate
+  encryption: none
+
+security:
+  # 远端发布默认 fail-closed；本地发布不需要填写这两项。
+  credential_rotation_completed_at: null
+  rotation_record: null
+
+publish:
+  targets:
+    # 默认只发布到本地目录，便于安全试跑。
+    - type: local
+      destination: ../../releases/example
+      versioned_prefix: true
