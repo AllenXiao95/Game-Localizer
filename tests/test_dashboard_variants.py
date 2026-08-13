@@ -53,7 +53,7 @@ class _Project:
     def __init__(self, root: Path, *, paths: dict, build: dict = None) -> None:
         self.root = root
         base = yaml.safe_load(
-            (ROOT / "projects" / "wot" / "project.example.yaml").read_text("utf-8")
+            (ROOT / "projects" / "example" / "project.yaml").read_text("utf-8")
         )
         base["paths"] = paths
         if build:

@@ -484,6 +484,7 @@ class LegacyCliFailsClosedTests(_Case):
         return path
 
     def test_omitting_config_is_now_an_error_not_a_downgrade(self) -> None:
+        from click import unstyle
         from typer.testing import CliRunner
 
         from localizer.cli.main import app
@@ -492,9 +493,10 @@ class LegacyCliFailsClosedTests(_Case):
             app, ["legacy", "--repository-root", str(self.root), "--save-tm"]
         )
         self.assertNotEqual(0, result.exit_code)
-        self.assertIn("--config", result.output)
+        self.assertIn("--config", unstyle(result.output))
 
     def test_switch_authority_cli_requires_the_legacy_tm(self) -> None:
+        from click import unstyle
         from typer.testing import CliRunner
 
         from localizer.cli.main import app
@@ -512,7 +514,7 @@ class LegacyCliFailsClosedTests(_Case):
             ],
         )
         self.assertNotEqual(0, result.exit_code)
-        self.assertIn("--legacy-tm", result.output)
+        self.assertIn("--legacy-tm", unstyle(result.output))
 
 
 class ReconciliationIsNotDecorativeTests(_Case):

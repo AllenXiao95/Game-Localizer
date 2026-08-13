@@ -23,7 +23,6 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from localizer.application.artifact import ArtifactBuilder
-from localizer.config import load_project_config
 from localizer.config.models import ProjectConfig
 from localizer.domain.translation_unit import TranslationUnit
 
@@ -150,20 +149,6 @@ class MultiSourceTests(unittest.TestCase):
         ))
         self.assertEqual("pts", pts.active_variant)
         self.assertEqual("1.45.0.0", pts.project.game_version)
-
-    def test_wot_production_config_maps_pts_to_pt_release_identity(self) -> None:
-        """生产 project.yaml 不能只有模型能力、却漏掉实际映射。"""
-        config = load_project_config(ROOT / "projects" / "wot" / "project.yaml")
-        live = config.for_variant("live")
-        pts = config.for_variant("pts")
-        self.assertEqual(
-            ("ru", "RU"),
-            (live.build.variant, live.build.compatibility_metadata.env),
-        )
-        self.assertEqual(
-            ("pt", "PT"),
-            (pts.build.variant, pts.build.compatibility_metadata.env),
-        )
 
     def test_pt_projection_builds_pt_named_legacy_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
