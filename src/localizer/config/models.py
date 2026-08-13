@@ -394,6 +394,29 @@ class CompatibilityMetadataSection(StrictModel):
         return values
 
 
+class BuildVariantOverrideSection(StrictModel):
+    """一个资源 variant 对应的公开发布身份。"""
+
+    variant: str
+    compatibility_env: Optional[str] = None
+
+    @validator("variant")
+    def variant_must_be_path_safe(cls, value: str) -> str:
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", value or ""):
+            raise ValueError(
+                "build.variant_overrides.*.variant must be a path-safe release component"
+            )
+        return value
+
+    @validator("compatibility_env")
+    def compatibility_env_must_be_non_empty(
+        cls, value: Optional[str]
+    ) -> Optional[str]:
+        if value is not None and not value.strip():
+            raise ValueError("compatibility_env must not be empty")
+        return value.strip() if value is not None else None
+
+
 class BuildSection(StrictModel):
     format: Literal["zip"] = "zip"
     release_channel: str = "local-release"
@@ -406,6 +429,10 @@ class BuildSection(StrictModel):
     archive_root: Optional[str] = None
     compatibility_metadata: CompatibilityMetadataSection = Field(
         default_factory=CompatibilityMetadataSection
+    )
+    # key 对应 paths.sources 的资源 variant；值控制包名/tag/metadata env。
+    variant_overrides: Dict[str, BuildVariantOverrideSection] = Field(
+        default_factory=dict
     )
 
     @validator("variant", "artifact_prefix")
@@ -448,6 +475,16 @@ class BuildSection(StrictModel):
             raise ValueError("AES-256 archive requires build.password_env")
         if values.get("encryption") == "none" and values.get("password_env"):
             raise ValueError("build.password_env is only valid with AES-256 encryption")
+        compatibility = values.get("compatibility_metadata")
+        overrides = values.get("variant_overrides") or {}
+        if compatibility and compatibility.enabled:
+            for source_variant, override in overrides.items():
+                environment = override.compatibility_env or compatibility.env
+                if environment.casefold() != override.variant.casefold():
+                    raise ValueError(
+                        f"build.variant_overrides.{source_variant} compatibility env "
+                        f"{environment!r} must match release variant {override.variant!r}"
+                    )
         return values
 
 
@@ -618,13 +655,31 @@ class ProjectConfig(StrictModel):
     review: ReviewSection = Field(default_factory=ReviewSection)
     publish: PublishSection = Field(default_factory=PublishSection)
 
+    @root_validator(skip_on_failure=True)
+    def build_variant_overrides_must_name_sources(cls, values: dict) -> dict:
+        paths = values.get("paths")
+        build = values.get("build")
+        overrides = set(build.variant_overrides) if build else set()
+        sources = set(paths.sources) if paths else set()
+        unknown = overrides - sources
+        if unknown:
+            raise ValueError(
+                "build.variant_overrides contains unknown paths.sources variants: "
+                + ", ".join(sorted(unknown))
+            )
+        return values
+
     def for_game_version(self, game_version: str) -> "ProjectConfig":
         """Return a task-local projection without mutating project.yaml."""
         data = self.model_dump() if hasattr(self, "model_dump") else self.dict()
         data["project"]["game_version"] = game_version
-        if hasattr(ProjectConfig, "model_validate"):
-            return ProjectConfig.model_validate(data)
-        return ProjectConfig.parse_obj(data)
+        projected = (
+            ProjectConfig.model_validate(data)
+            if hasattr(ProjectConfig, "model_validate")
+            else ProjectConfig.parse_obj(data)
+        )
+        object.__setattr__(projected, "_active_variant", self.active_variant)
+        return projected
 
     def for_variant(self, variant: Optional[str] = None) -> "ProjectConfig":
         """把多目录项目投影成一个单目录配置。
@@ -647,6 +702,13 @@ class ProjectConfig(StrictModel):
         data["paths"]["source"] = self.paths.sources[name]
         data["paths"]["workspace"] = self.paths.workspace / name
         data["paths"]["output"] = self.paths.output / name
+        release_override = self.build.variant_overrides.get(name)
+        if release_override is not None:
+            data["build"]["variant"] = release_override.variant
+            if release_override.compatibility_env is not None:
+                data["build"]["compatibility_metadata"][
+                    "env"
+                ] = release_override.compatibility_env
         projected = (
             ProjectConfig.model_validate(data)
             if hasattr(ProjectConfig, "model_validate")

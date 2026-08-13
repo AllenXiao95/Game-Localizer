@@ -135,9 +135,12 @@ class DashboardCollector:
                 "target_locale": self.config.languages.target,
                 "workflow_mode": self.config.workflow.mode,
                 "release_channel": self.config.build.release_channel,
+                "release_variant": self.config.build.variant or "",
+                "release_env": (
+                    self.config.build.compatibility_metadata.env or ""
+                ),
                 "config_path": str(self.config_path),
-                # 多目录项目（正式服/测试服）一次只看一个变体。不显示的话，
-                # 面板看起来就是「这个项目只有这些运行」，而不是「你在看 live」。
+                # API 每次请求只投影一个变体；页面下拉框可切换这个作用域。
                 "active_variant": self.config.active_variant,
                 "variants": self._variants(),
             },
@@ -272,8 +275,12 @@ class DashboardCollector:
             connection.close()
 
     def legacy_baseline(self) -> Dict[str, Any]:
-        """独立框架不绑定特定项目的迁移基线。"""
-        return _missing("未配置存量分类基线")
+        """M0 留下的存量分类基线，作为迁移前后的对照。"""
+        stats = self.repo_root / "audit/baseline/tm_classification_stats.json"
+        payload = _read_json(stats)
+        if payload is None:
+            return _missing(f"未找到分类基线：{stats}")
+        return {"available": True, "source": str(stats), **payload}
 
     # ------------------------------------------------------------------- runs
 
@@ -353,8 +360,17 @@ class DashboardCollector:
             "kind": str(payload.get("kind") or "run"),
             "status": payload.get("status"),
             "version": payload.get("version"),
+            "source_path": payload.get("source_path"),
+            "mode": payload.get("mode"),
+            "variant": payload.get("variant"),
             "parent_run_id": payload.get("parent_run_id"),
             "rebuild": rebuild if isinstance(rebuild, dict) else None,
+            "error": payload.get("error") if isinstance(payload.get("error"), dict) else None,
+            "confirmation": (
+                payload.get("confirmation")
+                if isinstance(payload.get("confirmation"), dict)
+                else None
+            ),
         }
 
     def run_detail(self, run_id: str) -> Optional[Dict[str, Any]]:

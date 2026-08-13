@@ -254,6 +254,46 @@ class ReviewService:
         index = self.index(run_id)
         return {"available": True, "clusters": self._current_glossary_clusters(index)}
 
+    def glossary_units(self, run_id: str, cluster_id: str) -> Dict[str, Any]:
+        """返回一个术语决策覆盖的全部词条，并回显当前人工定稿译文。"""
+        index = self.index(run_id)
+        cluster = next(
+            (
+                item
+                for item in self._current_glossary_clusters(index)
+                if item.get("cluster_id") == cluster_id
+            ),
+            None,
+        )
+        if cluster is None:
+            raise ValueError(f"unknown glossary cluster: {cluster_id}")
+        identities = list(cluster.get("violation_identities") or ())
+        committed = self.human_translations(identities)
+        rows = []
+        for identity in identities:
+            payload = index.units.get(identity)
+            if payload is None:
+                continue
+            rows.append(
+                {
+                    "stable_identity": identity,
+                    **payload,
+                    "original_translation": payload.get("translation") or "",
+                    "committed_translation": committed.get(identity),
+                    "current_translation": committed.get(
+                        identity, payload.get("translation") or ""
+                    ),
+                    "resolved": identity in committed,
+                }
+            )
+        rows.sort(key=lambda item: (item["relative_path"], item["logical_key"]))
+        return {
+            "available": True,
+            "cluster_id": cluster_id,
+            "total": len(rows),
+            "units": rows,
+        }
+
     def _term_for_cluster(
         self, cluster: Mapping[str, Any]
     ) -> Optional[GlossaryTerm]:

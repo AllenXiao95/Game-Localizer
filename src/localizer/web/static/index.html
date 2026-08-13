@@ -162,6 +162,9 @@
       <label>任务预设
         <select id="taskProfile"><option value="">临时配置（不套用预设）</option></select>
       </label>
+      <label>资源环境
+        <select id="taskVariant"><option value="">单一资源目录</option></select>
+      </label>
       <label>游戏版本
         <input id="taskVersion" autocomplete="off" placeholder="例如 1.44.0.0">
       </label>
@@ -232,20 +235,37 @@ const num = (n) => (n ?? 0).toLocaleString("zh-CN");
 
 let overview = null, runs = [], selectedRun = null, detail = null, activeTab = "summary";
 let taskProfiles = [], tasks = [], currentPreflight = null;
+let selectedVariant = new URLSearchParams(window.location.search).get("variant") || "";
 let qaFilter = { severity: "", code: "", q: "" };
 let qaOffset = 0;
 
+function variantLabel(name) {
+  const key = String(name || "").toLowerCase();
+  if (["live", "ru"].includes(key)) return "RU 正式服";
+  if (["pts", "pt"].includes(key)) return "PT 测试服";
+  return name || "单一资源目录";
+}
+
+function scopedApiPath(path) {
+  if (!selectedVariant) return path;
+  const url = new URL(path, window.location.origin);
+  url.searchParams.set("variant", selectedVariant);
+  return `${url.pathname}${url.search}`;
+}
+
 async function api(path) {
-  const res = await fetch(path, { headers: { Accept: "application/json" } });
+  const target = scopedApiPath(path);
+  const res = await fetch(target, { headers: { Accept: "application/json" } });
   if (!res.ok) throw new Error(`${res.status} ${path}`);
   return res.json();
 }
 
 async function postApi(path, payload) {
+  const bodyPayload = { ...payload, variant: selectedVariant };
   const res = await fetch(path, {
     method: "POST",
     headers: { Accept: "application/json", "Content-Type": "application/json", "X-Localizer-Action": "1" },
-    body: JSON.stringify(payload),
+    body: JSON.stringify(bodyPayload),
   });
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(body.message || `${res.status} ${path}`);
@@ -261,6 +281,7 @@ function taskPayload(includePreflight = false) {
     mode: $("taskMode").value,
     run_id: $("taskRunId").value.trim() || undefined,
     dotenv_path: $("taskDotenv").value.trim() || undefined,
+    variant: selectedVariant,
   };
   if (includePreflight && currentPreflight) payload.preflight_id = currentPreflight.preflight_id;
   return payload;
@@ -288,6 +309,20 @@ function renderPreflight() {
     <td>${Object.entries(f.by_match_scope || {}).map(([k, v]) =>
       `<span class="chip">${esc(k)} ${num(v)}</span>`).join(" ") || "—"}</td>
   </tr>`).join("");
+  const stale = p.stale_formal || { count: 0, entries: [] };
+  const stalePanel = stale.count ? `<div class="note" style="border-color:var(--err)">
+      <b>需要人工确认：${num(stale.count)} 条 formal 记录对应的游戏源文已更新。</b><br>
+      继续前会备份 SQLite TM，再退休这些旧记录；新译文仍由本次资源和 checkpoint 接管。
+      <div class="scroll short" style="margin-top:8px"><table><thead><tr>
+        <th>资源 / 键</th><th>旧源文</th><th>新源文</th><th>旧译文 / 来源</th></tr></thead><tbody>
+        ${stale.entries.map((entry) => `<tr><td class="mono">${esc(entry.relative_path)}<br>${esc(entry.logical_key)}</td>
+          <td>${esc(entry.old_source)}</td><td>${esc(entry.new_source)}</td>
+          <td>${esc(entry.old_translation)}<br><span class="chip">${esc(entry.origin)}</span></td></tr>`).join("")}
+      </tbody></table></div>
+      <div class="rowflex" style="margin-top:8px">
+        <button class="action" id="confirmPreflightStale" type="button">备份并退休旧记录</button>
+        <span class="muted" id="confirmPreflightStaleMsg">确认后需重新预检，防止计划在 TM 变更后失效。</span>
+      </div></div>` : "";
   $("preflightPanel").innerHTML = `<div class="rowflex" style="margin-bottom:10px">
       <span class="chip">扫描文件 <b>${num(p.files_total)}</b></span>
       <span class="chip warn">待翻译文件 <b>${num(p.files_pending)}</b></span>
@@ -295,17 +330,86 @@ function renderPreflight() {
       <span class="chip ok">TM 命中 <b>${num(p.tm_hits)}</b></span>
       <span class="chip warn">待翻译词条 <b>${num(p.pending_units)}</b></span>
     </div>
+    ${stalePanel}
     <div class="note">TM 命中来源：${scopes}<br>计划指纹：<span class="mono">${esc(p.plan_fingerprint.slice(0, 16))}…</span>。正式启动时会重新扫描并校验该指纹。</div>
     ${tokenizer ? `<div class="note">${tokenizer}</div>` : ""}
     ${pending.length ? `<div class="scroll tall"><table><thead><tr><th>待翻译文件</th><th>提取</th><th>TM 命中</th><th>待翻译</th><th>命中来源</th></tr></thead>
       <tbody>${rows}</tbody></table></div>` : `<div class="empty">所有词条均已有可用译文；启动后不会调用模型。</div>`}`;
+  $("launchTask").disabled = Boolean(stale.count);
+  $("confirmPreflightStale")?.addEventListener("click", async () => {
+    const button = $("confirmPreflightStale"), message = $("confirmPreflightStaleMsg");
+    button.disabled = true; message.textContent = "正在备份并重新校验候选…";
+    try {
+      const result = await postApi("/api/tasks/confirm-stale", {
+        preflight_id: p.preflight_id,
+      });
+      currentPreflight = null;
+      $("launchTask").disabled = true;
+      $("preflightPanel").innerHTML = `<div class="note" style="border-color:var(--ok)">
+        已退休 ${num(result.removed)} 条；备份：<span class="mono">${esc(result.backup || "无需备份")}</span>。<br>
+        请重新点击“分析待翻译内容”，确认更新后的计划。</div>`;
+    } catch (err) {
+      button.disabled = false; message.textContent = err.message;
+    }
+  });
 }
 
 function renderTaskProfiles() {
   const selected = $("taskProfile").value;
   $("taskProfile").innerHTML = `<option value="">临时配置（不套用预设）</option>` +
-    taskProfiles.map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("");
+    taskProfiles.map((p) => `<option value="${esc(p.id)}">${esc(p.name)}`
+      + `${p.variant ? ` · ${esc(variantLabel(p.variant))}` : ""}</option>`).join("");
   if (taskProfiles.some((p) => p.id === selected)) $("taskProfile").value = selected;
+}
+
+function renderVariantOptions() {
+  const variants = overview?.project?.variants || [];
+  const select = $("taskVariant");
+  if (!variants.length) {
+    select.innerHTML = `<option value="">单一资源目录</option>`;
+    select.value = "";
+    select.disabled = true;
+    return;
+  }
+  select.innerHTML = variants.map((item) =>
+    `<option value="${esc(item.name)}">${esc(variantLabel(item.name))}</option>`).join("");
+  select.value = selectedVariant;
+  select.disabled = false;
+}
+
+async function switchVariant(variant, { updateTaskForm = true } = {}) {
+  selectedVariant = String(variant || "");
+  currentPreflight = null;
+  selectedRun = null;
+  detail = null;
+  activeTab = "summary";
+  qaOffset = 0;
+  overview = await api("/api/overview");
+  selectedVariant = overview.project.active_variant || "";
+  const url = new URL(window.location.href);
+  if (selectedVariant) url.searchParams.set("variant", selectedVariant);
+  else url.searchParams.delete("variant");
+  window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+  const [profiles, runPayload, taskPayload] = await Promise.all([
+    api("/api/task-profiles"), api("/api/runs"), api("/api/tasks"),
+  ]);
+  taskProfiles = profiles.profiles;
+  runs = runPayload.runs;
+  tasks = taskPayload.tasks;
+  if (updateTaskForm) {
+    $("taskProfile").value = "";
+    $("profileName").value = "";
+    $("taskVersion").value = overview.project.game_version || "";
+    $("taskSource").value = overview.paths.source?.path || "";
+    $("taskRunId").value = "";
+  }
+  $("launchTask").disabled = true;
+  $("preflightPanel").innerHTML = `<div class="empty">已切换到 ${esc(variantLabel(selectedVariant))}，请重新分析待翻译内容。</div>`;
+  renderVariantOptions(); renderTaskProfiles(); renderHeader(); renderTm();
+  renderTaskStatus(); renderRuns(); renderPipeline();
+  $("tabBody").innerHTML = `<div class="empty">左侧选择一次运行</div>`;
+  $("taskMessage").className = "chip ok";
+  $("taskMessage").textContent = `已切换到 ${variantLabel(selectedVariant)}`;
 }
 
 // M6：对象级幂等跳过必须可见。GitHub/R2 摘要一致时会跳过重传，此前面板只显示
@@ -329,7 +433,10 @@ function publishSummary(target) {
 
 function renderTaskStatus() {
   const latest = tasks[0];
-  if (!latest) return;
+  if (!latest) {
+    $("taskStatus").textContent = `当前 ${variantLabel(selectedVariant)} 暂无任务记录。`;
+    return;
+  }
   const gate = latest.result?.quality_gate;
   const publishing = latest.kind === "publish" ? latest.result : null;
   const cls = latest.status === "failed" || gate?.passed === false || publishing?.passed === false
@@ -343,7 +450,9 @@ function renderTaskStatus() {
   // target:status，操作者看到"成功"却无法区分"真上传了"和"什么都没做"——
   // 而这两者在一次补发里是完全不同的结论。
   const publishDetail = publishing?.targets?.map((x) => publishSummary(x)).join(" / ");
-  const detail = latest.error?.message || publishDetail || latest.result?.artifact || latest.result?.output_root || "等待执行";
+  const detail = latest.status === "waiting_confirmation"
+    ? `资源已更新，等待确认 ${num(latest.confirmation?.count)} 条 formal 记录`
+    : latest.error?.message || publishDetail || latest.result?.artifact || latest.result?.output_root || "等待执行";
   const lineage = latest.parent_run_id
     ? ` · 增量重建自 <span class="mono">${esc(latest.parent_run_id)}</span>` : "";
   const rebuild = latest.result?.rebuild;
@@ -360,9 +469,29 @@ function renderTaskStatus() {
 }
 
 function bindTaskForm() {
-  $("taskProfile").addEventListener("change", () => {
+  $("taskVariant").addEventListener("change", async () => {
+    try {
+      await switchVariant($("taskVariant").value);
+    } catch (err) {
+      selectedVariant = overview?.project?.active_variant || "";
+      renderVariantOptions();
+      $("taskMessage").className = "chip err";
+      $("taskMessage").textContent = err.message;
+    }
+  });
+  $("taskProfile").addEventListener("change", async () => {
     const profile = taskProfiles.find((p) => p.id === $("taskProfile").value);
     if (!profile) return;
+    try {
+      if (profile.variant && profile.variant !== selectedVariant) {
+        await switchVariant(profile.variant, { updateTaskForm: false });
+        $("taskProfile").value = profile.id;
+      }
+    } catch (err) {
+      $("taskMessage").className = "chip err";
+      $("taskMessage").textContent = err.message;
+      return;
+    }
     $("profileName").value = profile.name;
     $("taskVersion").value = profile.version;
     $("taskSource").value = profile.source_path;
@@ -394,7 +523,7 @@ function bindTaskForm() {
     try {
       currentPreflight = await postApi("/api/tasks/preflight", taskPayload());
       renderPreflight();
-      $("launchTask").disabled = false;
+      $("launchTask").disabled = Boolean(currentPreflight.stale_formal?.count);
       $("taskMessage").className = "chip ok";
       $("taskMessage").textContent = `预检完成：${num(currentPreflight.pending_units)} 条待翻译`;
     } catch (err) {
@@ -505,7 +634,19 @@ async function renderTab() {
   if (!detail) return;
   const body = $("tabBody");
   if (activeTab === "review") { await renderReview(); return; }
-  if (activeTab === "summary") body.innerHTML = viewSummary();
+  if (activeTab === "summary") {
+    const task = detail.task;
+    if (task?.error?.type === "StaleFormalEntryError" && !task.confirmation) {
+      try {
+        task.confirmation = await api(
+          `/api/tasks/stale-formal?run_id=${encodeURIComponent(selectedRun)}`
+        );
+      } catch (err) {
+        task.confirmation_error = err.message;
+      }
+    }
+    body.innerHTML = viewSummary(); bindSummary();
+  }
   else if (activeTab === "live") body.innerHTML = viewLive();
   else if (activeTab === "batches") body.innerHTML = viewBatches();
   else if (activeTab === "artifact") { body.innerHTML = viewArtifact(); bindArtifact(); }
@@ -557,12 +698,48 @@ function viewSummary() {
       + (rebuild ? ` · 复用 ${num(rebuild.reused)} · 重试 ${num(rebuild.retried)}`
         + ` · 人工解决 ${num(rebuild.resolved_by_human)} · stale ${num(rebuild.stale)}${reuseSource}` : "")
       + `</div>` : "";
+  const confirmation = detail.task?.confirmation;
+  const confirmPanel = ["failed", "waiting_confirmation"].includes(detail.task?.status)
+    && detail.task?.error?.type === "StaleFormalEntryError" && confirmation
+    ? `<div class="note" style="border-color:var(--err)">
+        <b>执行已暂停，等待确认 ${num(confirmation.count)} 条过期 formal 记录。</b><br>
+        这是游戏资源更新后的源文漂移，不是 QA 仍在执行。确认后会先备份 TM、退休旧记录，
+        再恢复同一 run_id；checkpoint 中已成功的译文不会重新请求 Provider。
+        <div class="scroll short" style="margin-top:8px"><table><thead><tr>
+          <th>资源 / 键</th><th>旧源文</th><th>新源文</th><th>旧译文 / 来源</th></tr></thead><tbody>
+          ${(confirmation.entries || []).map((entry) => `<tr>
+            <td class="mono">${esc(entry.relative_path)}<br>${esc(entry.logical_key)}</td>
+            <td>${esc(entry.old_source)}</td><td>${esc(entry.new_source)}</td>
+            <td>${esc(entry.old_translation)}<br><span class="chip">${esc(entry.origin)}</span></td></tr>`).join("")}
+        </tbody></table></div>
+        <div class="rowflex" style="margin-top:8px">
+          <button class="action" id="confirmRunStale" type="button">备份、退休并继续原任务</button>
+          <span class="muted" id="confirmRunStaleMsg">不会删除 checkpoint。</span>
+        </div></div>`
+    : detail.task?.confirmation_error
+      ? `<div class="note" style="border-color:var(--err)">无法生成 formal 确认清单：${esc(detail.task.confirmation_error)}</div>`
+      : "";
   return `<div class="rowflex" style="gap:24px">
       <div style="flex:1 1 300px"><h3 style="font-size:13px;margin:0 0 8px">翻译进度</h3>${progress}</div>
       <div style="flex:1 1 300px"><h3 style="font-size:13px;margin:0 0 8px">QA 与闸门</h3>${qa}</div>
       <div style="flex:1 1 360px"><h3 style="font-size:13px;margin:0 0 8px">模型运行</h3>${runtime}</div>
-    </div>${lineage}
+    </div>${confirmPanel}${lineage}
     <div class="note">路径：<span class="mono">${esc(detail.paths.workspace || "—")}</span></div>`;
+}
+
+function bindSummary() {
+  $("confirmRunStale")?.addEventListener("click", async () => {
+    const button = $("confirmRunStale"), message = $("confirmRunStaleMsg");
+    button.disabled = true; message.textContent = "正在备份、复核并恢复 checkpoint…";
+    try {
+      const result = await postApi("/api/tasks/confirm-stale", { run_id: selectedRun });
+      message.textContent = `已退休 ${num(result.removed)} 条，原任务已重新入队。`;
+      tasks = (await api("/api/tasks")).tasks;
+      renderTaskStatus(); activeTab = "live"; await refresh();
+    } catch (err) {
+      button.disabled = false; message.textContent = err.message;
+    }
+  });
 }
 
 function stateChip(state) {
@@ -1071,7 +1248,7 @@ async function selectReviewRow(index) {
     el.setAttribute("aria-selected", String(Number(el.dataset.idx) === index)));
   const row = review.rows[index];
   if (!row) return;
-  if (review.view === "glossary") { renderClusterDetail(row); return; }
+  if (review.view === "glossary") { await renderClusterDetail(row); return; }
   const identity = review.view === "groups"
     ? row.members[0].stable_identity : row.stable_identity;
   review.detail = await reviewApi("unit", { stable_identity: identity });
@@ -1112,8 +1289,16 @@ function lineBreakCount(text) {
   return (String(text || "").match(/\r\n|\r|\n/g) || []).length;
 }
 
-function renderClusterDetail(cluster) {
+async function renderClusterDetail(cluster) {
   const firstFile = (cluster.files || [])[0] || "";
+  let clusterUnits = [];
+  try {
+    clusterUnits = (await reviewApi("glossary-units", {
+      cluster_id: cluster.cluster_id,
+    })).units || [];
+  } catch (err) {
+    reviewNote(err.message, "err");
+  }
   $("reviewDetail").innerHTML = `
     <h3 style="margin:0 0 10px;font-size:14px">${esc(cluster.source_term)} → ${esc(cluster.required_target)}</h3>
     <dl class="kv">
@@ -1128,8 +1313,26 @@ function renderClusterDetail(cluster) {
       : "改术语会改变全部违规的判据基准，改完只对本术语覆盖的词条重判。"}<br>
       多义词误报的正解是给术语加 <span class="mono">exclude_scope</span>，
       <b>不是</b>把正确的译文改错 —— 实测这类误报占术语违规的 23%。</div>
-    <div class="rowflex" style="margin-top:10px">
-      <button class="secondary" id="clusterRecheck">按当前译文重判本术语</button>
+    <div class="note" style="margin-top:10px">
+      <b>逐条修改违规译文</b>：下方回显的是当前有效译文（已人工落表的优先于本次运行原值）。
+      “本地重判”只检查；“落表”才会把编辑写入 TM 并进入决策日志。
+      <div class="scroll tall" style="margin-top:8px"><table><thead><tr>
+        <th>资源 / 键</th><th>源文</th><th>译文</th><th>操作</th></tr></thead><tbody>
+        ${clusterUnits.map((unit) => `<tr data-cluster-unit="${esc(unit.stable_identity)}">
+          <td class="mono">${esc(unit.relative_path)}<br>${esc(unit.logical_key)}</td>
+          <td>${esc(unit.source_text)}</td>
+          <td><textarea data-cluster-text="${esc(unit.stable_identity)}">${esc(unit.current_translation || "")}</textarea>
+            ${unit.resolved ? '<span class="chip ok">已人工落表</span>' : ""}</td>
+          <td><button class="secondary" data-cluster-check="${esc(unit.stable_identity)}">本地重判</button>
+            <div class="muted" data-cluster-result="${esc(unit.stable_identity)}"></div></td>
+        </tr>`).join("")}
+      </tbody></table></div>
+      <div class="rowflex" style="margin-top:8px">
+        <input id="clusterCommitReason" placeholder="修改理由（必填）" style="flex:1 1 240px">
+        <button class="action" id="clusterCommitChanged">落表已修改译文</button>
+        <button class="secondary" id="clusterRecheck">用表内当前译文重判全部</button>
+      </div>
+      <span class="muted">单次最多落表 100 条；提交前服务端会重新校验，并保留远端锁定译文。</span>
     </div>
     <div class="note" style="margin-top:10px">
       <b>按语境排除该术语</b>：填写相对于源目录的文件路径或 glob。建议先用精确文件名；
@@ -1146,10 +1349,12 @@ function renderClusterDetail(cluster) {
     </div>
     <div id="clusterResult"></div>`;
   $("clusterRecheck").addEventListener("click", async () => {
-    const units = await reviewApi("units", { code: "glossary_violation", limit: 500 });
     const edits = {};
-    units.units.filter((u) => cluster.violation_identities.includes(u.stable_identity))
-      .forEach((u) => { edits[u.stable_identity] = u.translation || ""; });
+    clusterUnits.forEach((unit) => {
+      edits[unit.stable_identity] = document.querySelector(
+        `[data-cluster-text="${CSS.escape(unit.stable_identity)}"]`
+      )?.value || "";
+    });
     const result = await postApi("/api/review/recheck", {
       run_id: selectedRun, edits, scope: `cluster:${cluster.cluster_id}`,
     });
@@ -1157,6 +1362,47 @@ function renderClusterDetail(cluster) {
     $("clusterResult").innerHTML = `<div class="note">
       重判 ${num(result.verdicts.length)} 条，仍违规 <b>${num(remaining.length)}</b> 条。
       <span class="muted">此结果不构成发布结论（authoritative=false）。</span></div>`;
+  });
+  document.querySelectorAll("[data-cluster-check]").forEach((button) =>
+    button.addEventListener("click", async () => {
+      const identity = button.dataset.clusterCheck;
+      const text = document.querySelector(
+        `[data-cluster-text="${CSS.escape(identity)}"]`
+      ).value;
+      try {
+        const result = await postApi("/api/review/recheck", {
+          run_id: selectedRun, edits: { [identity]: text },
+        });
+        const verdict = result.verdicts[0] || { fixed: [], remaining: [], introduced: [] };
+        document.querySelector(`[data-cluster-result="${CSS.escape(identity)}"]`).textContent =
+          `已消解 ${verdict.fixed.join(", ") || "—"}；仍有 ${verdict.remaining.join(", ") || "—"}`
+          + `；新增 ${verdict.introduced.join(", ") || "—"}`;
+      } catch (err) {
+        document.querySelector(`[data-cluster-result="${CSS.escape(identity)}"]`).textContent = err.message;
+      }
+    }));
+  $("clusterCommitChanged").addEventListener("click", async () => {
+    const reason = $("clusterCommitReason").value.trim();
+    if (!reason) { reviewNote("请填写修改理由 —— 它会进入决策日志。", "warn"); return; }
+    const edits = {};
+    clusterUnits.forEach((unit) => {
+      const value = document.querySelector(
+        `[data-cluster-text="${CSS.escape(unit.stable_identity)}"]`
+      ).value;
+      if (value !== (unit.current_translation || "")) edits[unit.stable_identity] = value;
+    });
+    if (!Object.keys(edits).length) {
+      reviewNote("没有检测到译文修改。", "warn"); return;
+    }
+    if (Object.keys(edits).length > 100) {
+      reviewNote("一次最多落表 100 条，请分批修改提交。", "warn"); return;
+    }
+    await runReviewAction(() => postApi("/api/review/commit", {
+      run_id: selectedRun,
+      edits,
+      reason,
+      expected_log_revision: review.session.log_revision,
+    }));
   });
   $("clusterExclude").addEventListener("click", async () => {
     const path = $("clusterExcludePath").value.trim();
@@ -1381,17 +1627,18 @@ function renderTm() {
 
 function renderHeader() {
   const p = overview.project;
-  // 多目录项目（正式服/测试服）一次只看一个变体。不标出来的话，面板看起来就是
-  // 「这个项目只有这些运行」，而不是「你正在看 live，pts 的运行在另一个目录」。
+  // 当前 variant 决定资源、运行、输出、审查与任务 API 的完整作用域。
   const variantChip = p.active_variant
     ? ` · <span class="mono">${esc(p.active_variant)}</span>` +
       (p.variants?.length > 1
-        ? `<span class="muted" style="font-size:12px"> （共 ${p.variants.length} 个资源目录，`
-          + `切换用 <span class="mono">--variant</span>）</span>`
+        ? `<span class="muted" style="font-size:12px"> （${esc(variantLabel(p.active_variant))}）</span>`
         : "")
     : "";
+  const releaseChip = p.release_variant
+    ? ` · 发布 <span class="mono">${esc(p.release_variant)}/${esc(p.release_env || "—")}</span>`
+    : "";
   $("projectChip").innerHTML = `<b>${esc(p.name)}</b> ${esc(p.source_locale)} → ${esc(p.target_locale)}
-    · ${esc(p.workflow_mode)}${variantChip}`;
+    · ${esc(p.workflow_mode)}${variantChip}${releaseChip}`;
   const tm = overview.tm;
   $("tmChip").className = "chip " + (tm?.available ? (tm.authoritative ? "warn" : "ok") : "");
   $("tmChip").textContent = tm?.available
@@ -1424,6 +1671,8 @@ async function refresh() {
 
 Promise.all([api("/api/task-profiles"), api("/api/overview")]).then(([profiles, initial]) => {
   taskProfiles = profiles.profiles; overview = initial;
+  selectedVariant = initial.project.active_variant || "";
+  renderVariantOptions();
   $("taskVersion").value = initial.project.game_version || "";
   $("taskSource").value = initial.paths.source?.path || "";
   $("taskDotenv").placeholder = initial.environment?.dotenv_files?.length

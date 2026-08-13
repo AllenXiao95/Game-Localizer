@@ -11,20 +11,24 @@ relative_path + logical_key 构成，不含变体；而 lookup 比对 source_fin
 from __future__ import annotations
 
 import sys
+import json
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Optional
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from localizer.application.artifact import ArtifactBuilder
+from localizer.config import load_project_config
 from localizer.config.models import ProjectConfig
 from localizer.domain.translation_unit import TranslationUnit
 
 
-def _config(root: Path, paths: dict) -> ProjectConfig:
+def _config(root: Path, paths: dict, *, build: Optional[dict] = None) -> ProjectConfig:
     for name in ("prompt.md", "glossary.yaml", "rules.yaml"):
         (root / name).write_text("schema_version: 1\n", encoding="utf-8")
     data = {
@@ -43,6 +47,8 @@ def _config(root: Path, paths: dict) -> ProjectConfig:
         },
         "tm": {"database": root / "shared-tm.sqlite3"},
     }
+    if build is not None:
+        data["build"] = build
     return (
         ProjectConfig.model_validate(data)
         if hasattr(ProjectConfig, "model_validate")
@@ -114,6 +120,131 @@ class MultiSourceTests(unittest.TestCase):
         self.assertEqual(live.glossary.file, pts.glossary.file)
         self.assertEqual(live.rules.file, pts.rules.file)
         self.assertEqual(live.prompt.template, pts.prompt.template)
+
+    def test_release_identity_is_projected_with_the_resource_variant(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = _config(
+                root,
+                {
+                    "sources": {"live": root / "Tanki", "pts": root / "Tanki_PT"},
+                    "workspace": root / "var",
+                    "output": root / "out",
+                },
+                build={
+                    "variant": "ru",
+                    "compatibility_metadata": {"enabled": True, "env": "RU"},
+                    "variant_overrides": {
+                        "live": {"variant": "ru", "compatibility_env": "RU"},
+                        "pts": {"variant": "pt", "compatibility_env": "PT"},
+                    },
+                },
+            )
+            live = config.for_variant("live")
+            pts = config.for_variant("pts").for_game_version("1.45.0.0")
+        self.assertEqual(("ru", "RU"), (
+            live.build.variant, live.build.compatibility_metadata.env
+        ))
+        self.assertEqual(("pt", "PT"), (
+            pts.build.variant, pts.build.compatibility_metadata.env
+        ))
+        self.assertEqual("pts", pts.active_variant)
+        self.assertEqual("1.45.0.0", pts.project.game_version)
+
+    def test_wot_production_config_maps_pts_to_pt_release_identity(self) -> None:
+        """生产 project.yaml 不能只有模型能力、却漏掉实际映射。"""
+        config = load_project_config(ROOT / "projects" / "wot" / "project.yaml")
+        live = config.for_variant("live")
+        pts = config.for_variant("pts")
+        self.assertEqual(
+            ("ru", "RU"),
+            (live.build.variant, live.build.compatibility_metadata.env),
+        )
+        self.assertEqual(
+            ("pt", "PT"),
+            (pts.build.variant, pts.build.compatibility_metadata.env),
+        )
+
+    def test_pt_projection_builds_pt_named_legacy_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            resources = root / "resources"
+            resources.mkdir()
+            resource = resources / "messages.mo"
+            resource.write_bytes(b"pt fixture")
+            config = _config(
+                root,
+                {
+                    "sources": {"live": root / "Tanki", "pts": root / "Tanki_PT"},
+                    "workspace": root / "var",
+                    "output": root / "out",
+                },
+                build={
+                    "variant": "ru",
+                    "compatibility_metadata": {"enabled": True, "env": "RU"},
+                    "variant_overrides": {
+                        "live": {"variant": "ru", "compatibility_env": "RU"},
+                        "pts": {"variant": "pt", "compatibility_env": "PT"},
+                    },
+                },
+            ).for_variant("pts")
+            compatibility = (
+                config.build.compatibility_metadata.model_dump()
+                if hasattr(config.build.compatibility_metadata, "model_dump")
+                else config.build.compatibility_metadata.dict()
+            )
+            bundle = ArtifactBuilder().build_release(
+                project_id=config.project.id,
+                run_id="pt-release",
+                resource_root=resources,
+                resource_paths=[resource],
+                destination=root / "bundle",
+                version="1.45.0.0",
+                variant=config.build.variant,
+                compatibility_metadata=compatibility,
+            )
+            metadata = json.loads(bundle.public_metadata.read_text(encoding="utf-8"))
+        self.assertEqual("i18n_pt_v1.45.0.0.zip", bundle.artifact.name)
+        self.assertEqual("pt-v1.45.0.0", bundle.release_slug)
+        self.assertEqual("PT", metadata["env"])
+
+    def test_release_override_cannot_name_an_unknown_resource_variant(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            with self.assertRaises(ValueError):
+                _config(
+                    root,
+                    {
+                        "sources": {"live": root / "Tanki"},
+                        "workspace": root / "var",
+                        "output": root / "out",
+                    },
+                    build={
+                        "variant_overrides": {
+                            "pts": {"variant": "pt"},
+                        }
+                    },
+                )
+
+    def test_release_override_env_must_match_the_public_variant(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            with self.assertRaises(ValueError):
+                _config(
+                    root,
+                    {
+                        "sources": {"pts": root / "Tanki_PT"},
+                        "workspace": root / "var",
+                        "output": root / "out",
+                    },
+                    build={
+                        "variant": "ru",
+                        "compatibility_metadata": {"enabled": True, "env": "RU"},
+                        "variant_overrides": {
+                            "pts": {"variant": "pt", "compatibility_env": "RU"},
+                        },
+                    },
+                )
 
     def test_identical_coordinates_share_one_tm_row_across_variants(self) -> None:
         # 共享是结构性的：stable_identity 不含变体。

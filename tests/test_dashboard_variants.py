@@ -17,6 +17,7 @@ import json
 import sys
 import tempfile
 import unittest
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -49,12 +50,14 @@ EMPTY_CHECKPOINT = json.dumps(
 class _Project:
     """在临时目录里搭一个真实可加载的项目配置。"""
 
-    def __init__(self, root: Path, *, paths: dict) -> None:
+    def __init__(self, root: Path, *, paths: dict, build: dict = None) -> None:
         self.root = root
         base = yaml.safe_load(
-            (ROOT / "projects" / "example" / "project.yaml").read_text("utf-8")
+            (ROOT / "projects" / "wot" / "project.example.yaml").read_text("utf-8")
         )
         base["paths"] = paths
+        if build:
+            base["build"].update(build)
         self.path = root / "project.yaml"
         self.path.write_text(
             yaml.safe_dump(base, allow_unicode=True, sort_keys=False), encoding="utf-8"
@@ -71,7 +74,16 @@ def _multi_variant(root: Path, *, default: bool = True) -> _Project:
     }
     if default:
         paths["default_variant"] = "live"
-    return _Project(root, paths=paths)
+    return _Project(
+        root,
+        paths=paths,
+        build={
+            "variant_overrides": {
+                "live": {"variant": "ru", "compatibility_env": "RU"},
+                "pts": {"variant": "pt", "compatibility_env": "PT"},
+            }
+        },
+    )
 
 
 def _seed_run(collector: DashboardCollector, run_id: str) -> None:
@@ -202,7 +214,9 @@ class MultiVariantOverHttpTests(unittest.TestCase):
         self._temp = tempfile.TemporaryDirectory()
         self.root = Path(self._temp.name)
         project = _multi_variant(self.root)
+        live = build_collector(project.path, self.root, variant="live")
         collector = build_collector(project.path, self.root, variant="pts")
+        _seed_run(live, "run-live")
         _seed_run(collector, "run-pts")
         self.server = DashboardServer(collector, port=0).start_background()
 
@@ -213,6 +227,19 @@ class MultiVariantOverHttpTests(unittest.TestCase):
     def _get(self, path: str):
         url = self.server.url.rstrip("/") + path
         with urllib.request.urlopen(url, timeout=10) as res:
+            return res.status, json.loads(res.read().decode("utf-8"))
+
+    def _post(self, path: str, payload: dict):
+        request = urllib.request.Request(
+            self.server.url.rstrip("/") + path,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "X-Localizer-Action": "1",
+            },
+            data=json.dumps(payload).encode("utf-8"),
+        )
+        with urllib.request.urlopen(request, timeout=10) as res:
             return res.status, json.loads(res.read().decode("utf-8"))
 
     def test_overview_returns_200_and_names_the_variant(self) -> None:
@@ -227,6 +254,83 @@ class MultiVariantOverHttpTests(unittest.TestCase):
         status, payload = self._get("/api/runs")
         self.assertEqual(200, status)
         self.assertEqual(["run-pts"], [r["run_id"] for r in payload["runs"]])
+
+    def test_variant_query_switches_the_complete_read_scope(self) -> None:
+        _, overview = self._get("/api/overview?variant=live")
+        _, pts_overview = self._get("/api/overview?variant=pts")
+        _, payload = self._get("/api/runs?variant=live")
+        self.assertEqual("live", overview["project"]["active_variant"])
+        self.assertTrue(overview["paths"]["source"]["path"].endswith("live"))
+        self.assertEqual(("ru", "RU"), (
+            overview["project"]["release_variant"], overview["project"]["release_env"]
+        ))
+        self.assertEqual(("pt", "PT"), (
+            pts_overview["project"]["release_variant"],
+            pts_overview["project"]["release_env"],
+        ))
+        self.assertEqual(["run-live"], [r["run_id"] for r in payload["runs"]])
+
+    def test_task_profile_persists_variant_in_the_shared_store(self) -> None:
+        status, profile = self._post(
+            "/api/task-profiles",
+            {
+                "name": "PT preview",
+                "version": "1.44.0.0",
+                "source_path": str(self.root / "pts"),
+                "mode": "preview",
+                "variant": "pts",
+            },
+        )
+        self.assertEqual(201, status)
+        self.assertEqual("pts", profile["variant"])
+        _, live_view = self._get("/api/task-profiles?variant=live")
+        self.assertEqual("pts", live_view["profiles"][0]["variant"])
+        self.assertTrue((self.root / "ws" / "web" / "task-profiles.json").is_file())
+
+    def test_variant_body_routes_preflight_to_the_matching_task_service(self) -> None:
+        captured = {}
+
+        class Plan:
+            def as_dict(self):
+                return {
+                    "plan_fingerprint": "pts-plan",
+                    "files_total": 0,
+                    "files_pending": 0,
+                    "extracted_units": 0,
+                    "tm_hits": 0,
+                    "embedded_translations": 0,
+                    "pending_units": 0,
+                    "by_match_scope": {},
+                    "files": [],
+                }
+
+        class Runner:
+            def __init__(self, config):
+                captured["variant"] = config.active_variant
+                captured["source"] = Path(config.paths.source)
+
+            def plan(self):
+                return Plan()
+
+        self.server.task_services["pts"].runner_factory = Runner
+        status, preflight = self._post(
+            "/api/tasks/preflight",
+            {
+                "version": "1.44.0.0",
+                "source_path": str(self.root / "pts"),
+                "mode": "preview",
+                "variant": "pts",
+            },
+        )
+        self.assertEqual(200, status)
+        self.assertEqual("pts", preflight["variant"])
+        self.assertEqual("pts", captured["variant"])
+        self.assertEqual(self.root / "pts", captured["source"])
+
+    def test_unknown_variant_is_a_bad_request(self) -> None:
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            self._get("/api/overview?variant=sandbox")
+        self.assertEqual(400, ctx.exception.code)
 
 
 if __name__ == "__main__":

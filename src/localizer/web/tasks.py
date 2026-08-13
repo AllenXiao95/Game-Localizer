@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sqlite3
 import socket
 import threading
 import uuid
@@ -19,7 +20,8 @@ from typing import Any, Callable, Dict, Mapping, Optional
 from localizer.application.local_build import BuildMode
 from localizer.application.artifact import ReleaseBundle
 from localizer.application.publish import PublishOrchestrator
-from localizer.application.project_runner import ProjectRunner
+from localizer.adapters.storage.sqlite_tm import SQLiteTranslationMemory, TMEntry
+from localizer.application.project_runner import ProjectRunner, StaleFormalEntryError
 from localizer.application.quality_gate import QualityGateError
 from localizer.config.models import ProjectConfig
 from localizer.infrastructure.atomic_io import AtomicIO
@@ -37,7 +39,7 @@ _PROFILE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 # 钱的译文只能整轮作废。中断态同样应当可恢复；「它是不是真的不在跑了」由
 # `_is_live` 单独判断，而不是靠状态字面量猜。
 _INTERRUPTED_STATES = frozenset({"queued", "running"})
-_RESUMABLE_STATES = frozenset({"failed"}) | _INTERRUPTED_STATES
+_RESUMABLE_STATES = frozenset({"failed", "waiting_confirmation"}) | _INTERRUPTED_STATES
 
 # 进程身份的兜底令牌。同一进程内恒定，进程间几乎必然不同。
 _FALLBACK_PROCESS_TOKEN = f"nostart-{os.getpid()}-{uuid.uuid4().hex}"
@@ -140,7 +142,9 @@ class TaskProfileStore:
             isinstance(item, dict) for item in profiles
         ):
             raise ValueError("task profile store contains invalid profiles")
-        return profiles
+        # schema v1 的旧预设没有 variant；API 统一补成空字符串，页面可以在
+        # 单目录项目和升级后的多变体项目之间使用同一份渲染逻辑。
+        return [{**item, "variant": str(item.get("variant") or "")} for item in profiles]
 
     def save(self, payload: Mapping[str, Any]) -> dict:
         name = str(payload.get("name") or "").strip()
@@ -161,6 +165,7 @@ class TaskProfileStore:
             "source_path": str(source),
             "mode": _validate_mode(payload.get("mode")).value,
             "dotenv_path": self._dotenv_path(payload.get("dotenv_path")),
+            "variant": str(payload.get("variant") or "").strip(),
         }
         with self._lock:
             profiles = self.list()
@@ -196,22 +201,31 @@ class TaskService:
         config: ProjectConfig,
         *,
         runner_factory: Callable[[ProjectConfig], ProjectRunner] = ProjectRunner,
+        executor: Optional[ThreadPoolExecutor] = None,
+        profiles: Optional[TaskProfileStore] = None,
+        is_busy=None,
+        maintenance_lock=None,
     ) -> None:
         self.config = config
-        self.profiles = TaskProfileStore(config.paths.workspace)
+        self.variant = config.active_variant
+        self.profiles = profiles or TaskProfileStore(config.paths.workspace)
         self.runner_factory = runner_factory
-        self._executor = ThreadPoolExecutor(
+        self._owns_executor = executor is None
+        self._executor = executor or ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="localizer-task"
         )
         self._tasks: Dict[str, dict] = {}
         self._preflights: Dict[str, dict] = {}
         self._lock = threading.Lock()
+        self._is_busy = is_busy or self._local_busy
+        self._maintenance_lock = maintenance_lock or threading.RLock()
 
     def list_profiles(self) -> list[dict]:
         return self.profiles.list()
 
     def save_profile(self, payload: Mapping[str, Any]) -> dict:
-        return self.profiles.save(payload)
+        variant = self._validate_variant(payload)
+        return self.profiles.save({**payload, "variant": variant})
 
     def list_tasks(self) -> list[dict]:
         with self._lock:
@@ -228,6 +242,7 @@ class TaskService:
 
     def preflight(self, payload: Mapping[str, Any]) -> dict:
         """只读扫描资源和 TM，不调用 Provider、不创建 run 工作区。"""
+        variant = self._validate_variant(payload)
         version, mode, source, dotenv_path = self._validated_request(payload)
         config = self._overridden_config(source, version)
         dotenv_files = [Path(dotenv_path)] if dotenv_path else []
@@ -254,8 +269,10 @@ class TaskService:
             "source_kind": "file" if source.is_file() else "directory",
             "dotenv_path": dotenv_path,
             "mode": mode.value,
+            "variant": variant,
             **plan.as_dict(),
         }
+        result["stale_formal"] = self._stale_formal_preview(config, plan)
         if runtime is not None:
             result["runtime"] = runtime
         with self._lock:
@@ -268,7 +285,222 @@ class TaskService:
                 self._preflights.pop(item["preflight_id"], None)
         return dict(result)
 
+    def confirm_stale(self, payload: Mapping[str, Any]) -> dict:
+        """人工确认资源更新后失效的 formal 记录，并按需恢复原 checkpoint。"""
+        variant = self._validate_variant(payload)
+        run_id = str(payload.get("run_id") or "").strip()
+        preflight_id = str(payload.get("preflight_id") or "").strip()
+        if bool(run_id) == bool(preflight_id):
+            raise ValueError("confirm-stale requires exactly one of run_id or preflight_id")
+
+        with self._maintenance_lock:
+            if self._is_busy():
+                raise ValueError("有任务正在运行；请等待结束后再修改共享 TM")
+            if run_id:
+                validate_run_id(run_id)
+                request_path = (
+                    self.config.paths.workspace / "runs" / run_id / "task-request.json"
+                )
+                previous = json.loads(AtomicIO.read_text(request_path))
+                if not isinstance(previous, Mapping):
+                    raise ValueError("task snapshot must be a JSON object")
+                if previous.get("status") not in {"failed", "waiting_confirmation"}:
+                    raise ValueError("run is not waiting for stale formal confirmation")
+                error = previous.get("error") or {}
+                if not isinstance(error, Mapping) or error.get("type") != "StaleFormalEntryError":
+                    raise ValueError("run is not blocked by stale formal entries")
+                self._validate_variant(previous)
+                version, mode, source, dotenv_path = self._validated_request(previous)
+                config = self._overridden_config(source, version)
+            else:
+                with self._lock:
+                    preflight = self._preflights.get(preflight_id)
+                if preflight is None:
+                    raise ValueError("unknown or expired preflight_id; run preflight again")
+                self._validate_variant(preflight)
+                version, mode, source, dotenv_path = self._validated_request(preflight)
+                config = self._overridden_config(source, version)
+
+            dotenv_files = [Path(dotenv_path)] if dotenv_path else []
+            with temporary_dotenv(dotenv_files, override=True):
+                plan = self.runner_factory(config).plan()
+            if preflight_id and plan.fingerprint != preflight["plan_fingerprint"]:
+                raise ValueError(
+                    "preflight is stale because source, TM, rules, glossary, Prompt or "
+                    "configuration changed; run preflight again"
+                )
+            preview = self._stale_formal_preview(config, plan)
+            expected = set(
+                (previous.get("confirmation") or {}).get("identities") or ()
+            ) if run_id else set(
+                (preflight.get("stale_formal") or {}).get("identities") or ()
+            )
+            actual = set(preview["identities"])
+            if expected and actual != expected:
+                raise ValueError("stale formal candidates changed; inspect and confirm again")
+
+            backup_path = None
+            removed = 0
+            if actual:
+                backup_path = self._backup_tm(config, run_id or preflight_id)
+                with SQLiteTranslationMemory(config.tm.database) as tm:
+                    removed = tm.retire_stale_formal_entries(
+                        self._plan_entries(plan), expected_identities=actual
+                    )
+
+            audit = {
+                "schema_version": 1,
+                "confirmed_at": datetime.now(timezone.utc).isoformat(),
+                "variant": variant,
+                "run_id": run_id or None,
+                "preflight_id": preflight_id or None,
+                "backup": str(backup_path) if backup_path else None,
+                "removed": removed,
+                "entries": preview["entries"],
+            }
+            if run_id:
+                AtomicIO.write_json(
+                    self.config.paths.workspace
+                    / "runs"
+                    / run_id
+                    / "review"
+                    / "stale-formal-retirement.json",
+                    audit,
+                )
+            else:
+                AtomicIO.write_json(
+                    self.config.paths.workspace
+                    / "web"
+                    / "stale-formal-retirements"
+                    / f"{preflight_id}.json",
+                    audit,
+                )
+                with self._lock:
+                    self._preflights.pop(preflight_id, None)
+
+            response = dict(audit)
+            if run_id:
+                response["task"] = self.submit(
+                    {
+                        "version": version,
+                        "source_path": str(source),
+                        "mode": mode.value,
+                        "run_id": run_id,
+                        "dotenv_path": dotenv_path,
+                        "variant": variant,
+                    }
+                )
+            return response
+
+    def stale_for_run(self, run_id: str) -> dict:
+        """为旧版写成 failed 的 StaleFormalEntryError 即时重建确认清单。"""
+        validate_run_id(run_id)
+        request_path = (
+            self.config.paths.workspace / "runs" / run_id / "task-request.json"
+        )
+        previous = json.loads(AtomicIO.read_text(request_path))
+        if not isinstance(previous, Mapping):
+            raise ValueError("task snapshot must be a JSON object")
+        if previous.get("status") not in {"failed", "waiting_confirmation"}:
+            raise ValueError("run is not waiting for stale formal confirmation")
+        error = previous.get("error") or {}
+        if not isinstance(error, Mapping) or error.get("type") != "StaleFormalEntryError":
+            raise ValueError("run is not blocked by stale formal entries")
+        self._validate_variant(previous)
+        version, _mode, source, dotenv_path = self._validated_request(previous)
+        config = self._overridden_config(source, version)
+        dotenv_files = [Path(dotenv_path)] if dotenv_path else []
+        with temporary_dotenv(dotenv_files, override=True):
+            plan = self.runner_factory(config).plan()
+        return self._stale_formal_preview(config, plan)
+
+    def _local_busy(self) -> bool:
+        return any(
+            item.get("status") in {"queued", "running"}
+            for item in self.list_tasks()
+        )
+
+    @staticmethod
+    def _plan_entries(plan) -> list[TMEntry]:
+        return [
+            TMEntry(
+                stable_identity=unit.stable_identity,
+                project_id=unit.project_id,
+                adapter_id=unit.adapter_id,
+                relative_path=unit.relative_path,
+                logical_key=unit.logical_key,
+                source_text=unit.source_text,
+                source_fingerprint=unit.source_fingerprint,
+                translation=unit.translation or "",
+                origin="machine",
+                review_state="unreviewed",
+                match_scope="coordinate",
+            )
+            for resource in getattr(plan, "resources", ())
+            for unit in resource.units
+        ]
+
+    def _stale_formal_preview(self, config: ProjectConfig, plan) -> dict:
+        candidates = self._plan_entries(plan)
+        # 预检承诺只读；新项目尚无 TM 时也不能顺手创建目录/数据库。
+        with SQLiteTranslationMemory(config.tm.database, read_only=True) as tm:
+            identities = tm.stale_formal_identities(candidates)
+            rows = tm.rows_for(identities)
+        current = {entry.stable_identity: entry for entry in candidates}
+        entries = []
+        for identity in identities:
+            old = rows.get(identity)
+            new = current.get(identity)
+            if old is None or new is None:
+                continue
+            entries.append(
+                {
+                    "stable_identity": identity,
+                    "relative_path": new.relative_path,
+                    "logical_key": new.logical_key,
+                    "origin": old.get("origin"),
+                    "review_state": old.get("review_state"),
+                    "old_source": old.get("source_text"),
+                    "new_source": new.source_text,
+                    "old_translation": old.get("translation"),
+                }
+            )
+        return {
+            "count": len(entries),
+            "requires_confirmation": bool(entries),
+            "identities": [entry["stable_identity"] for entry in entries],
+            "entries": entries,
+        }
+
+    @staticmethod
+    def _backup_tm(config: ProjectConfig, label: str) -> Path:
+        safe_label = re.sub(r"[^A-Za-z0-9._-]+", "-", label).strip("-._")[:48]
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
+        destination = (
+            config.tm.database.parent
+            / "backups"
+            / f"tm-before-stale-confirm-{safe_label}-{stamp}.sqlite3"
+        ).resolve()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if destination.exists():
+            raise FileExistsError(f"backup already exists: {destination}")
+        source = sqlite3.connect(str(config.tm.database))
+        target = sqlite3.connect(str(destination))
+        try:
+            source.backup(target)
+        finally:
+            target.close()
+            source.close()
+        return destination
+
     def submit(self, payload: Mapping[str, Any]) -> dict:
+        # 与 stale formal 维护共用一把锁：确认页完成“复核→备份→退休→恢复”期间，
+        # 不能从另一个请求缝隙插入新任务。RLock 允许确认流程在锁内恢复原任务。
+        with self._maintenance_lock:
+            return self._submit(payload)
+
+    def _submit(self, payload: Mapping[str, Any]) -> dict:
+        variant = self._validate_variant(payload)
         version, mode, source, dotenv_path = self._validated_request(payload)
         preflight_id = str(payload.get("preflight_id") or "").strip() or None
         expected_plan_fingerprint = None
@@ -277,12 +509,13 @@ class TaskService:
                 preflight = self._preflights.get(preflight_id)
             if preflight is None:
                 raise ValueError("unknown or expired preflight_id; run preflight again")
-            expected = (version, str(source), mode.value, dotenv_path)
+            expected = (version, str(source), mode.value, dotenv_path, variant)
             actual = (
                 preflight["version"],
                 preflight["source_path"],
                 preflight["mode"],
                 preflight["dotenv_path"],
+                preflight.get("variant", self.variant),
             )
             if expected != actual:
                 raise ValueError("task parameters changed after preflight; run preflight again")
@@ -323,6 +556,7 @@ class TaskService:
             "preflight_id": preflight_id,
             "expected_plan_fingerprint": expected_plan_fingerprint,
             "mode": mode.value,
+            "variant": variant,
             "status": "queued",
             "created_at": created_at,
             "started_at": None,
@@ -359,12 +593,17 @@ class TaskService:
         return dict(task)
 
     def submit_rebuild(self, payload: Mapping[str, Any]) -> dict:
+        with self._maintenance_lock:
+            return self._submit_rebuild(payload)
+
+    def _submit_rebuild(self, payload: Mapping[str, Any]) -> dict:
         """基于选中的父运行创建不可变子运行。
 
         WebUI 不复制 ``ProjectRunner.rebuild_from_run`` 的兼容性判断。这里只负责
         恢复父任务当时的动态 version/source/dotenv 覆盖、建立任务快照并排队；
         源文指纹与 checkpoint 复用安全性仍由 Application Service 判定。
         """
+        variant = self._validate_variant(payload)
         parent_run_id = str(payload.get("parent_run_id") or "").strip()
         validate_run_id(parent_run_id)
         mode = _validate_mode(payload.get("mode"))
@@ -399,6 +638,7 @@ class TaskService:
             "preflight_id": None,
             "expected_plan_fingerprint": None,
             "mode": mode.value,
+            "variant": variant,
             "status": "queued",
             "created_at": datetime.now(timezone.utc).isoformat(),
             "started_at": None,
@@ -436,7 +676,12 @@ class TaskService:
         return dict(task)
 
     def submit_publish(self, payload: Mapping[str, Any]) -> dict:
+        with self._maintenance_lock:
+            return self._submit_publish(payload)
+
+    def _submit_publish(self, payload: Mapping[str, Any]) -> dict:
         """Queue an explicit publish for an existing, verified release run."""
+        variant = self._validate_variant(payload)
         run_id = str(payload.get("run_id") or "").strip()
         validate_run_id(run_id)
         if not self.config.publish.targets:
@@ -470,6 +715,7 @@ class TaskService:
             "run_id": run_id,
             "manifest": str(manifests[0]),
             "dotenv_path": dotenv_path,
+            "variant": variant,
             "status": "queued",
             "created_at": datetime.now(timezone.utc).isoformat(),
             "started_at": None,
@@ -569,8 +815,9 @@ class TaskService:
             str(previous.get("mode")),
             previous_source,
             previous.get("dotenv_path"),
+            str(previous.get("variant") or self.variant),
         )
-        actual = (version, mode.value, source, dotenv_path)
+        actual = (version, mode.value, source, dotenv_path, self.variant)
         if expected != actual:
             raise ValueError(
                 "failed run parameters differ from this request; use a new run_id"
@@ -766,10 +1013,26 @@ class TaskService:
                 "error": None,
             }
         except Exception as exc:
-            final_changes = {
-                "status": "failed",
-                "error": {"type": type(exc).__name__, "message": str(exc)},
-            }
+            if isinstance(exc, StaleFormalEntryError):
+                try:
+                    confirmation = self._stale_formal_preview(config, runner.plan())
+                except Exception:
+                    confirmation = {
+                        "count": len(exc.identities),
+                        "requires_confirmation": True,
+                        "identities": list(exc.identities),
+                        "entries": [],
+                    }
+                final_changes = {
+                    "status": "waiting_confirmation",
+                    "confirmation": confirmation,
+                    "error": {"type": type(exc).__name__, "message": str(exc)},
+                }
+            else:
+                final_changes = {
+                    "status": "failed",
+                    "error": {"type": type(exc).__name__, "message": str(exc)},
+                }
         finally:
             # 先原子落盘最终快照，再对查询端公开终态，避免 API 已显示 completed
             # 而磁盘仍停在 queued 的短暂竞态。
@@ -871,9 +1134,15 @@ class TaskService:
                         for pattern in adapter["include"]
                     ]
                     # exclude 表达的是相对同一个（未改变的）源根的规则，照旧生效。
-        if hasattr(ProjectConfig, "model_validate"):
-            return ProjectConfig.model_validate(data)
-        return ProjectConfig.parse_obj(data)
+        overridden = (
+            ProjectConfig.model_validate(data)
+            if hasattr(ProjectConfig, "model_validate")
+            else ProjectConfig.parse_obj(data)
+        )
+        # active_variant 是运行期 PrivateAttr，不参与 model_dump/parse；这里若不
+        # 恢复，路径虽然仍在 pts 工作区，Runner/Manifest 的可观测变体却会变空。
+        object.__setattr__(overridden, "_active_variant", self.variant)
+        return overridden
 
     def _enclosing_source_root(self, source: Path) -> Optional[Path]:
         """选中项落在哪个已配置的源根里。
@@ -923,6 +1192,21 @@ class TaskService:
         dotenv_path = TaskProfileStore._dotenv_path(payload.get("dotenv_path"))
         return version, mode, source, dotenv_path
 
+    def _validate_variant(self, payload: Mapping[str, Any]) -> str:
+        """确保请求体选择的资源变体与当前 TaskService 一致。"""
+        raw = payload.get("variant")
+        requested = (
+            self.variant
+            if raw is None or str(raw).strip() == ""
+            else str(raw).strip()
+        )
+        if requested != self.variant:
+            raise ValueError(
+                f"request variant {requested!r} does not match active variant "
+                f"{self.variant!r}"
+            )
+        return self.variant
+
     def _update(self, task_id: str, **changes: Any) -> None:
         with self._lock:
             self._tasks[task_id].update(changes)
@@ -933,4 +1217,5 @@ class TaskService:
         return timestamp + uuid.uuid4().hex[:6]
 
     def shutdown(self) -> None:
-        self._executor.shutdown(wait=False, cancel_futures=False)
+        if self._owns_executor:
+            self._executor.shutdown(wait=False, cancel_futures=False)

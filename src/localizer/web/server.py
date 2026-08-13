@@ -10,11 +10,12 @@ from __future__ import annotations
 import ipaddress
 import json
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
 
 from localizer.config import load_project_config
@@ -23,7 +24,7 @@ from localizer.application.review_log import LogRevisionMismatch
 
 from .collector import DashboardCollector
 from .review import ReviewConflict, ReviewService, ReviewUnavailable
-from .tasks import TaskService
+from .tasks import TaskProfileStore, TaskService
 
 STATIC_ROOT = Path(__file__).resolve().parent / "static"
 
@@ -31,6 +32,7 @@ STATIC_ROOT = Path(__file__).resolve().parent / "static"
 _POST_ROUTES = {
     "/api/task-profiles",
     "/api/tasks/preflight",
+    "/api/tasks/confirm-stale",
     "/api/tasks/run",
     "/api/tasks/rebuild",
     "/api/tasks/publish",
@@ -69,14 +71,19 @@ class _Handler(BaseHTTPRequestHandler):
     def __init__(
         self,
         *args,
-        collector: DashboardCollector,
-        tasks: Optional[TaskService] = None,
-        review: Optional[ReviewService] = None,
+        collectors: Dict[str, DashboardCollector],
+        task_services: Dict[str, TaskService],
+        reviews: Dict[str, ReviewService],
+        default_variant: str,
         **kwargs,
     ) -> None:
-        self.collector = collector
-        self.tasks = tasks
-        self.review = review
+        self._collectors = collectors
+        self._task_services = task_services
+        self._reviews = reviews
+        self._default_variant = default_variant
+        self.collector = collectors[default_variant]
+        self.tasks = task_services.get(default_variant)
+        self.review = reviews.get(default_variant)
         super().__init__(*args, **kwargs)
 
     # 默认实现会把每条请求打到 stderr，跑起来很吵；保留错误日志即可。
@@ -88,9 +95,15 @@ class _Handler(BaseHTTPRequestHandler):
         route = parsed.path.rstrip("/") or "/"
         params = parse_qs(parsed.query)
         try:
+            self._activate_variant(self._single(params, "variant"))
             self._dispatch(route, params)
         except BrokenPipeError:
             pass
+        except ValueError as exc:
+            self._json(
+                {"error": type(exc).__name__, "message": str(exc)},
+                status=HTTPStatus.BAD_REQUEST,
+            )
         except Exception as exc:  # 面板不应该因为单个视图异常而整体挂掉
             self._json({"error": type(exc).__name__, "message": str(exc)},
                        status=HTTPStatus.INTERNAL_SERVER_ERROR)
@@ -98,7 +111,7 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         route = parsed.path.rstrip("/") or "/"
-        if self.tasks is None or route not in _POST_ROUTES:
+        if not self._task_services or route not in _POST_ROUTES:
             self._method_not_allowed()
             return
         if self.headers.get("Content-Type", "").split(";", 1)[0] != "application/json":
@@ -119,12 +132,23 @@ class _Handler(BaseHTTPRequestHandler):
             payload = json.loads(self.rfile.read(length).decode("utf-8"))
             if not isinstance(payload, dict):
                 raise ValueError("request body must be a JSON object")
+            self._activate_variant(payload.get("variant"))
             if route == "/api/task-profiles":
                 result = self.tasks.save_profile(payload)
                 self._json(result, status=HTTPStatus.CREATED)
             elif route == "/api/tasks/preflight":
                 result = self.tasks.preflight(payload)
                 self._json(result)
+            elif route == "/api/tasks/confirm-stale":
+                result = self.tasks.confirm_stale(payload)
+                self._json(
+                    result,
+                    status=(
+                        HTTPStatus.ACCEPTED
+                        if result.get("task") is not None
+                        else HTTPStatus.OK
+                    ),
+                )
             elif route == "/api/tasks/run":
                 result = self.tasks.submit(payload)
                 self._json(result, status=HTTPStatus.ACCEPTED)
@@ -205,6 +229,12 @@ class _Handler(BaseHTTPRequestHandler):
                 self._json(service.session(run_id))
             elif view == "glossary":
                 self._json(service.glossary_clusters(run_id))
+            elif view == "glossary-units":
+                self._json(
+                    service.glossary_units(
+                        run_id, self._single(params, "cluster_id") or ""
+                    )
+                )
             elif view == "groups":
                 majority = self._single(params, "has_majority")
                 self._json(
@@ -351,6 +381,14 @@ class _Handler(BaseHTTPRequestHandler):
                 }
             )
             return
+        if route == "/api/tasks/stale-formal":
+            if self.tasks is None:
+                self._method_not_allowed()
+                return
+            self._json(
+                self.tasks.stale_for_run(self._single(params, "run_id") or "")
+            )
+            return
         if route.startswith("/api/tasks/"):
             task_id = unquote(route[len("/api/tasks/"):])
             payload = self.tasks.task(task_id) if self.tasks else None
@@ -397,6 +435,17 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(payload)
             return
         self._json({"error": "not_found", "message": route}, status=HTTPStatus.NOT_FOUND)
+
+    def _activate_variant(self, value: object) -> None:
+        requested = str(value or self._default_variant).strip()
+        if requested not in self._collectors:
+            choices = sorted(name for name in self._collectors if name)
+            raise ValueError(
+                f"unknown variant {requested!r}; available: {choices or ['(single source)']}"
+            )
+        self.collector = self._collectors[requested]
+        self.tasks = self._task_services.get(requested)
+        self.review = self._reviews.get(requested)
 
     @staticmethod
     def _single(params: dict, key: str) -> Optional[str]:
@@ -462,31 +511,60 @@ class DashboardServer:
             except ValueError:
                 loopback = host.lower() == "localhost"
             enable_tasks = loopback
-        self.tasks = TaskService(collector.config) if enable_tasks else None
-        # 审查视图与任务启动同一个开关：非回环绑定时一律只读。
-        self.review = (
-            ReviewService(
-                collector.config,
-                output_root=collector.output,
-                workspace_root=collector.workspace,
-                is_busy=self._tasks_busy,
-            )
+        self.collectors = self._variant_collectors(collector)
+        self.default_variant = collector.config.active_variant
+        if not self.collectors.get(self.default_variant):
+            self.default_variant = ""
+
+        # 不同资源变体共享同一 SQLite TM，因此所有 variant 必须进入同一个
+        # 单 worker 队列；否则 RU/PT 页面各自排队仍可能同时写 TM。
+        self._task_executor = (
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="localizer-task")
             if enable_tasks
             else None
         )
+        base_workspace = self._base_workspace(collector)
+        shared_profiles = TaskProfileStore(base_workspace) if enable_tasks else None
+        self._tm_maintenance_lock = threading.RLock()
+        self.task_services = {
+            name: TaskService(
+                item.config,
+                executor=self._task_executor,
+                profiles=shared_profiles,
+                is_busy=self._tasks_busy,
+                maintenance_lock=self._tm_maintenance_lock,
+            )
+            for name, item in self.collectors.items()
+        } if enable_tasks else {}
+        self.tasks = self.task_services.get(self.default_variant)
+
+        # 审查与文件读取仍按 variant 隔离；忙碌判据则覆盖所有变体。
+        self.reviews = {
+            name: ReviewService(
+                item.config,
+                output_root=item.output,
+                workspace_root=item.workspace,
+                is_busy=self._tasks_busy,
+            )
+            for name, item in self.collectors.items()
+        } if enable_tasks else {}
+        self.review = self.reviews.get(self.default_variant)
         try:
             self._httpd = ThreadingHTTPServer(
                 (host, port),
                 partial(
                     _Handler,
-                    collector=collector,
-                    tasks=self.tasks,
-                    review=self.review,
+                    collectors=self.collectors,
+                    task_services=self.task_services,
+                    reviews=self.reviews,
+                    default_variant=self.default_variant,
                 ),
             )
         except OSError as exc:
-            if self.tasks is not None:
-                self.tasks.shutdown()
+            for service in self.task_services.values():
+                service.shutdown()
+            if self._task_executor is not None:
+                self._task_executor.shutdown(wait=False, cancel_futures=False)
             # Windows 上 10013/10048 很常见：Hyper-V、WSL 或 WinNAT 会成段保留动态端口，
             # 报出来的却是「权限不足」，很容易被误判成要管理员权限。
             raise DashboardBindError(
@@ -503,12 +581,36 @@ class DashboardServer:
 
         TM 是单写者，而且跑到一半的运行会读到半截数据。
         """
-        if self.tasks is None:
+        if not self.task_services:
             return False
         return any(
             str(task.get("status")) in {"queued", "running"}
-            for task in self.tasks.list_tasks()
+            for service in self.task_services.values()
+            for task in service.list_tasks()
         )
+
+    @staticmethod
+    def _variant_collectors(
+        collector: DashboardCollector,
+    ) -> Dict[str, DashboardCollector]:
+        variants = collector.config.paths.variants
+        if not variants:
+            return {"": collector}
+        # build_collector 来自真实 project.yaml；重新加载未投影配置，避免在已经
+        # 追加了 /live 的 workspace 上再次 for_variant('pts') 变成 /live/pts。
+        base = load_project_config(collector.config_path)
+        return {
+            name: DashboardCollector(
+                base.for_variant(name), collector.config_path, collector.repo_root
+            )
+            for name in sorted(variants)
+        }
+
+    @staticmethod
+    def _base_workspace(collector: DashboardCollector) -> Path:
+        if not collector.config.paths.variants:
+            return Path(collector.config.paths.workspace)
+        return Path(load_project_config(collector.config_path).paths.workspace)
 
     @property
     def address(self) -> Tuple[str, int]:
@@ -531,8 +633,10 @@ class DashboardServer:
         if self._thread is not None and self._thread.is_alive():
             self._httpd.shutdown()
         self._httpd.server_close()
-        if self.tasks is not None:
-            self.tasks.shutdown()
+        for service in self.task_services.values():
+            service.shutdown()
+        if self._task_executor is not None:
+            self._task_executor.shutdown(wait=False, cancel_futures=False)
         if self._thread is not None:
             self._thread.join(timeout=5)
 
@@ -573,8 +677,8 @@ def build_collector(
     except ValueError as exc:
         raise VariantRequired(
             f"{exc}\n"
-            f"面板一次只看一个资源目录：用 `--variant <名字>` 指定，"
-            f"或在 project.yaml 里设 `paths.default_variant`。"
+            f"面板启动时需要一个初始资源目录：用 `--variant <名字>` 指定，"
+            f"或在 project.yaml 里设 `paths.default_variant`；启动后可在页面切换。"
         ) from exc
     root = Path(repo_root).resolve() if repo_root else Path.cwd().resolve()
     return DashboardCollector(config, config_path, root)

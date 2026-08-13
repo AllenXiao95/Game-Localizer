@@ -19,7 +19,9 @@ import json
 import sys
 import tempfile
 import unittest
+from hashlib import sha256
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,7 +30,9 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from localizer.application.local_build import BuildMode
+from localizer.adapters.storage.sqlite_tm import SQLiteTranslationMemory, TMEntry
 from localizer.config.models import ProjectConfig
+from localizer.domain.translation_unit import TranslationUnit
 from localizer.infrastructure.atomic_io import AtomicIO
 from localizer.web.tasks import TaskService
 
@@ -252,6 +256,7 @@ class SubdirectorySelectionTests(_Case):
         config = self.service()._overridden_config(game / "gui", "1")
         self.assertNotIn("gui/readme.txt", self._scanned(config))
 
+
     def test_selecting_the_root_itself_changes_nothing(self) -> None:
         game = self._tree()
         service = self.service()
@@ -265,6 +270,55 @@ class SubdirectorySelectionTests(_Case):
         (outside / "menu.mo").write_bytes(b"")
         config = self.service()._overridden_config(outside, "1")
         self.assertEqual(outside, Path(config.paths.source))
+
+
+class StaleFormalConfirmationTests(_Case):
+    def test_preflight_exposes_old_and_new_source_then_backs_up_and_retires(self) -> None:
+        config = _config(self.root)
+        unit = TranslationUnit(
+            project_id="game", adapter_id="gettext", relative_path="gui/menu.mo",
+            logical_key="title", source_text="new source", source_locale="ru-RU",
+            target_locale="zh-Hans",
+        )
+        old = TMEntry(
+            stable_identity=unit.stable_identity, project_id="game", adapter_id="gettext",
+            relative_path="gui/menu.mo", logical_key="title", source_text="old source",
+            source_fingerprint=sha256(b"old source").hexdigest(), translation="旧人工译文",
+            origin="human", review_state="reviewed", match_scope="coordinate_exact",
+            quality_state="passed", is_formal=True, human_authored=True,
+        )
+        with SQLiteTranslationMemory(config.tm.database) as tm:
+            tm.upsert(old)
+        plan = SimpleNamespace(
+            fingerprint="stale-plan", resources=(SimpleNamespace(units=(unit,)),),
+            as_dict=lambda: {
+                "plan_fingerprint": "stale-plan", "files_total": 1, "files_pending": 1,
+                "extracted_units": 1, "tm_hits": 0, "embedded_translations": 0,
+                "pending_units": 1, "filtered_units": 0, "by_match_scope": {}, "files": [],
+            },
+        )
+
+        class Runner:
+            def __init__(self, _config):
+                pass
+
+            def plan(self):
+                return plan
+
+        service = TaskService(config, runner_factory=Runner)
+        self.addCleanup(service.shutdown)
+        preflight = service.preflight(
+            {"version": "1", "source_path": str(self.root / "game"), "mode": "preview"}
+        )
+        self.assertEqual(1, preflight["stale_formal"]["count"])
+        entry = preflight["stale_formal"]["entries"][0]
+        self.assertEqual(("old source", "new source", "旧人工译文"),
+                         (entry["old_source"], entry["new_source"], entry["old_translation"]))
+        outcome = service.confirm_stale({"preflight_id": preflight["preflight_id"]})
+        self.assertEqual(1, outcome["removed"])
+        self.assertTrue(Path(outcome["backup"]).is_file())
+        with SQLiteTranslationMemory(config.tm.database) as tm:
+            self.assertNotIn(unit.stable_identity, tm.rows_for([unit.stable_identity]))
 
 
 class ResumeGateTests(_Case):
@@ -304,6 +358,15 @@ class ResumeGateTests(_Case):
         service = self.service()
         self.assertEqual(
             "t1", self._validate(service, self._seed("r1", status="failed"))
+        )
+
+    def test_a_confirmation_blocked_run_is_resumable(self) -> None:
+        service = self.service()
+        self.assertEqual(
+            "t1",
+            self._validate(
+                service, self._seed("r-confirm", status="waiting_confirmation")
+            ),
         )
 
     def test_a_killed_run_left_at_running_is_resumable(self) -> None:
