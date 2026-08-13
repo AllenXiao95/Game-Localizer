@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "defaults": {
+    "adapter_id": "gettext",
+    "relative_path": "items/names.po"
+  },
+  "entries": [
+    {
+      "logical_key": "Mana Potion",
+      "source_text": "Mana Potion",
+      "translation": "法力药水"
+    },
+    {
+      "logical_key": "Iron Sword",
+      "source_text": "Iron Sword",
+      "translation": "铁剑"
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "defaults": {
+    "adapter_id": "gettext",
+    "relative_path": "ui/menu.po"
+  },
+  "entries": [
+    {
+      "logical_key": "Start Game",
+      "source_text": "Start Game",
+      "translation": "开始游戏"
+    },
+    {
+      "logical_key": "Exit",
+      "source_text": "Exit",
+      "translation": "退出"
+    }
+  ]
+}

@@ -2,8 +2,11 @@ schema_version: 1
 
 # 复制整个 projects/example 目录即可创建新项目；相对路径均以本文件所在目录为基准。
 project:
+  # 稳定机器标识，会参与 TM 坐标；开始积累 TM 后不要随意修改。
   id: example-game
+  # 仅用于界面和报告展示。
   name: Example Game
+  # 当前资源版本；发布命名会自动添加 v，所以这里不要写 v1.0.0。
   game_version: 1.0.0
 
 paths:
@@ -13,20 +16,26 @@ paths:
   #   live: ./source/live
   #   beta: ./source/beta
   # default_variant: live
+  # checkpoint、运行状态、报告和备份等中间数据；不应提交 Git。
   workspace: ../../var/example/workspace
+  # 渲染资源、preview/release 制品和 manifest 的输出目录。
   output: ../../var/example/output
 
 # tokenizer 等可复用缓存不会写入项目目录。
 cache:
+  # Hugging Face 快照实际位于该目录的 tokenizers 子目录。
   root: ../../var/cache
+  # shared 表示可跨项目复用；project 模式仍应同时配置独立 root。
   scope: shared
 
 environment:
   # 从 project.yaml 所在目录向仓库根目录查找 Git 忽略的 .env。
   auto_discover: true
+  # false 表示系统/CI 已设置的环境变量优先于 .env。
   override_existing: false
 
 languages:
+  # BCP 47 风格的源语言与目标语言标识，用于 TM 和语言 QA。
   source: en-US
   target: zh-Hans
 
@@ -37,14 +46,19 @@ resources:
       include:
         - "**/*.po"
         - "**/*.mo"
+      # 可用 exclude 排除备份或临时文件，例如 "**/*.bak.po"。
+      exclude: []
       options:
         # standard: msgid=源文，msgstr=译文。
         # keyed_source: msgid=资源键，msgstr=待翻译原文（部分游戏使用）。
         layout: standard
+        # skip 忽略空源文；error 会把空源文当作数据错误。
         empty_source: skip
+        # all 适合通用项目；特殊旧项目才需要语言脚本过滤。
         source_filter: all
 
 prompt:
+  # 项目级翻译要求；流水线会另外组装本批源文、术语和输出协议。
   template: ./prompt.md
   # 可选背景只提供游戏语境，不应包含密钥或运行时数据。
   background: ./background.md
@@ -55,6 +69,7 @@ glossary:
   auto_discovery: candidate_only
 
 rules:
+  # QA、过滤和规范化规则；最小文件只需 schema_version: 1。
   file: ./rules.yaml
 
 provider:
@@ -63,17 +78,23 @@ provider:
   base_url: https://api.example.com/v1
   # 这里只写环境变量名，真实密钥写入 Git 忽略的 .env。
   api_key_env: LOCALIZER_API_KEY
+  # 服务端翻译模型 ID；它与下面的本地 tokenizer ID 相互独立。
   model: provider-model-name
+  # 保留下面的可选块必须安装 .[tokenizer-huggingface]；删除后使用保守估算器。
   # 可选；本地 tokenizer 身份独立配置，绝不从上面的 API 模型名自动推断。
   tokenizer:
     type: huggingface
     model: organization/tokenizer-repository
     revision: pinned-revision
     local_files_only: false
+  # 同时处理的资源组上限；先从 2-4 开始，避免触发供应商限流。
   concurrency: 4
+  # 单次 HTTP 请求超时秒数。
   timeout_seconds: 120
+  # 总上下文窗口与最大输出；max_output_tokens 必须小于 context_window。
   context_window: 32768
   max_output_tokens: 4096
+  # 供应商扩展 JSON 参数，例如 top_p；不能覆盖 model/messages/max_tokens 等。
   custom_parameters: {}
 
 tm:
@@ -83,7 +104,7 @@ tm:
   global_exact_match: reviewed_only
   commit_policy: quality_gate
 
-# 空配置表示 release 对新增 error 零容忍；不要在通用示例中预置历史债务。
+# 空配置表示 release 对新增 error 零容忍；legacy_debt_baseline 仅用于登记存量债务。
 quality_gate: {}
 
 workflow:
@@ -91,11 +112,17 @@ workflow:
   mode: local
 
 build:
+  # 当前只支持 zip。
   format: zip
+  # 写入制品元数据的通道名，不是资源目录名。
   release_channel: stable
+  # 公开制品身份中的目标变体。
   variant: zh-Hans
+  # 压缩包文件名前缀。
   artifact_prefix: example-localization
+  # deflate 兼容性最好；也可选 lzma 或 stored。
   compression: deflate
+  # aes256 还需要 build.password_env 和 .[artifact-aes]。
   encryption: none
 
 security:
@@ -108,4 +135,5 @@ publish:
     # 默认只发布到本地目录，便于安全试跑。
     - type: local
       destination: ../../releases/example
+      # true 会在目标内增加版本化目录，避免覆盖旧发布。
       versioned_prefix: true

@@ -1,0 +1,193 @@
+# TM and SQLite guide
+
+[中文](../translation-memory.md) | **English**
+
+## Concepts
+
+Translation Memory (TM) stores translations for reuse in future versions. SQLite is used instead of a simple source-to-translation dictionary because the framework also records:
+
+- a stable coordinate composed from project, adapter, relative path, and logical key;
+- a source fingerprint that prevents reuse after source changes;
+- machine, human, or legacy origin;
+- review, quality, formal state, and run identity;
+- legacy synchronization evidence and authority state.
+
+Declare only the database path and policy:
+
+```yaml
+tm:
+  database: ../../var/my-project/localizer.sqlite
+  global_exact_match: reviewed_only
+  commit_policy: quality_gate
+```
+
+The path is resolved from `project.yaml`.
+
+## Initialize a new SQLite TM
+
+Do not install a SQLite CLI or create tables manually. Any write workflow creates the parent directory, file, schema, and indexes, including:
+
+- `localizer build ...`;
+- `localizer tm-sync-legacy ...`;
+- a Dashboard build or actual human write.
+
+Recommended initialization:
+
+```powershell
+localizer validate-config projects/my-project/project.yaml
+localizer scan projects/my-project/project.yaml
+localizer build projects/my-project/project.yaml --mode preview --run-id tm-init
+```
+
+The first two commands are read-only. The build opens a write connection and creates SQLite even when the preview produces no formal translations.
+
+On Windows, check the configured path with:
+
+```powershell
+Test-Path var\my-project\localizer.sqlite
+```
+
+Dashboard overview also shows the resolved path, schema, and statistics.
+
+## Schema creation versus formal TM content
+
+An existing `.sqlite` file does not imply reusable translations exist:
+
+- `preview` creates candidates, reports, and checkpoints; it does not automatically make machine candidates formal truth.
+- After a successful QualityGate, `release` can promote eligible machine results to formal TM.
+- Dashboard human approval writes audited formal records with priority over machine output.
+- Legacy JSON rows enter with legacy classifications and are reusable only when their classification, review state, and `global_exact_match` policy allow it.
+
+## Build from existing translated resources
+
+If there is no old TM JSON and only translated resources are available, use [Build TM from existing translations](tm-bootstrap.md). It documents direct adapter ingestion and the neutral TM Seed format for unknown structures.
+
+## Convert legacy JSON TM to SQLite
+
+### Scope
+
+`tm-sync-legacy` accepts the `history_tm.json` compatibility shape produced by the earlier script workflow. It is not an arbitrary JSON importer:
+
+```json
+{
+  "relative/path/to/catalog": {
+    "logical_key": {
+      "ru": "source text",
+      "zh": "translated text"
+    }
+  }
+}
+```
+
+The outer key becomes relative path and the second-level key becomes logical key. `ru`/`zh` are fixed legacy field names; actual SQLite locale metadata still comes from current `languages.source` and `languages.target`. Convert other structures to this exact compatibility shape or, preferably, to the neutral Seed format—renaming the extension is not enough.
+
+### 1. Back up migration inputs
+
+Keep the original legacy TM, current project/glossary/rules, any existing SQLite, and a representative accepted artifact or behavioral baseline. Never overwrite the original JSON. The importer reads it without modification and writes a separate guard marker.
+
+### 2. Validate the project
+
+```powershell
+localizer validate-config projects/my-project/project.yaml
+```
+
+Legacy records are classified with the current project ID, locales, glossary, and QA rules. Finalize these first; changing `project.id` later changes stable coordinates.
+
+### 3. Synchronize
+
+```powershell
+localizer tm-sync-legacy `
+  projects/my-project/project.yaml `
+  path/to/history_tm.json
+```
+
+The command:
+
+1. creates or opens configured SQLite;
+2. creates stable coordinates and source fingerprints;
+3. classifies old translations with placeholder, language, and glossary checks;
+4. writes legacy shadow rows;
+5. writes `<workspace>/reports/legacy-tm-migration.json`;
+6. creates a `.shadow-sync.lock` next to the old JSON.
+
+An identical file hash is skipped on repeat. Use `--force` only to deliberately reclassify/resynchronize:
+
+```powershell
+localizer tm-sync-legacy projects/my-project/project.yaml path/to/history_tm.json --force
+```
+
+Synchronization replaces that project's legacy shadow rows but cannot overwrite protected human/formal SQLite rows.
+
+### 4. Review the report
+
+Verify `total`, `imported`, clean/suspect/quarantined classification distribution, reasons such as empty/untranslated/placeholder/rule/glossary failure, and whether `skipped_unchanged` is expected. Quarantined rows are not silently reused.
+
+## Establish a baseline from an accepted artifact
+
+If no trustworthy TM exists but an accepted release artifact does, analyze it first:
+
+```powershell
+localizer tm-adopt-artifact `
+  projects/my-project/project.yaml `
+  path/to/artifact-manifest.json
+```
+
+Then attest and apply:
+
+```powershell
+localizer tm-adopt-artifact `
+  projects/my-project/project.yaml `
+  path/to/artifact-manifest.json `
+  --apply `
+  --accepted-by project-owner
+```
+
+Application creates a SQLite backup and data-baseline report. Use a real, traceable operator identity. Verify rebuild behavior:
+
+```powershell
+localizer tm-verify-artifact `
+  projects/my-project/project.yaml `
+  path/to/artifact-manifest.json `
+  --run-id verify-001
+```
+
+## When to switch SQLite authority
+
+New projects do not need legacy governance commands. In a migration where an old program still writes `history_tm.json`, synchronization only builds a shadow. Switch authority only after the old writer is frozen and data/behavior are verified:
+
+```powershell
+localizer tm-switch-authority projects/my-project/project.yaml `
+  --behavior-baseline path/to/behavior-baseline.json `
+  --data-baseline path/to/data-baseline.json `
+  --legacy-tm path/to/history_tm.json
+```
+
+Prerequisites include: SQLite is not already authoritative, at least one legacy sync exists, the final-sync hash still matches the old JSON, legacy row counts match evidence, and the behavior/data baseline files are valid independent evidence. This is a one-way governance action, not routine initialization; repeat switching is rejected.
+
+## Export SQLite back to legacy JSON
+
+For rollback, use the explicit exporter rather than manually querying tables:
+
+```powershell
+localizer tm-export-legacy `
+  projects/my-project/project.yaml `
+  path/to/exported-history-tm.json
+```
+
+By default it does not overwrite existing files, omits quarantined/unknown rows, and writes a provenance sidecar for human/formal/review attributes the old format cannot represent. `--overwrite` permits replacement; `--include-quarantined` enables row-for-row transport but may expose unmarked problematic rows to the old program, so inspect the report first.
+
+## Backup and concurrency
+
+- Do not modify SQLite externally while Dashboard tasks run.
+- The task queue serializes writers, including variants that share TM.
+- Use application backup workflows or the SQLite backup API; copying only the main file may omit WAL data.
+- `.sqlite-wal` and `.sqlite-shm` are not standalone backups.
+- Back up both the human-decision log and its usable TM projection.
+
+## Troubleshooting
+
+Low hit counts usually mean path/key mismatch, changed source fingerprints, or quarantined history. Inspect reports and scan coordinates instead of weakening fingerprint checks.
+
+Do not edit translations with SQLite Browser: that bypasses decision logs, protection rules, and audit fields. Use Dashboard or a tested migration/import command.
+
+Deleting SQLite starts over but destroys translations, review state, and migration evidence. A safer trial uses a new `tm.database` path and switches only after verification.

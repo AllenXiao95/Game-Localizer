@@ -4,7 +4,7 @@
 
 # Game Localizer
 
-[简体中文](README.md) | **English** | [日本語](README.ja.md)
+[简体中文](README.md) | **English**
 
 Game Localizer is a localization pipeline for game text. It brings resource scanning, translation memory, machine translation, quality assurance, human revision, artifact building, and publishing together in one traceable workflow.
 
@@ -27,13 +27,24 @@ The project is driven by declarative configuration and supports individual games
 - Python 3.10 or later
 - Git (for version control; the pipeline itself does not require a remote repository)
 
-Install the development version:
+For a first local checkout, create an isolated environment and install the complete feature set. Windows PowerShell:
 
 ```powershell
-python -m pip install -e .
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -e ".[all]"
 ```
 
-Install optional features as needed:
+Or use Conda:
+
+```powershell
+conda env create -f environment.yml
+conda activate game_localizer
+python -m pip install -e ".[all]"
+```
+
+`.[all]` is recommended for first-time users. It includes the Hugging Face tokenizer, AES artifacts, and all remote publishers. For a minimal installation, use `python -m pip install -e .` and add features as needed:
 
 ```powershell
 # AES-256 encrypted artifacts
@@ -46,6 +57,16 @@ python -m pip install -e ".[tokenizer-huggingface]"
 python -m pip install -e ".[publish-all]"
 ```
 
+`tokenizer-huggingface` is conditionally required: if `project.yaml` contains `provider.tokenizer`, install it before analysis or translation. Remove the entire tokenizer block to use the built-in conservative token estimator instead. See [First-time setup](docs/en/getting-started.md#choose-an-installation-profile).
+
+## Documentation
+
+- [First-time setup](docs/en/getting-started.md): venv/Conda, installation profiles, credentials, and the first run.
+- [General usage guide](docs/en/usage.md): scanning, preview, review, release builds, and publishing.
+- [`project.yaml` reference](docs/en/project-configuration.md): semantic explanations for every configuration section.
+- [Build TM from existing translations](docs/en/tm-bootstrap.md): ingest supported resources or convert an unknown structure to neutral TM Seed files.
+- [TM and SQLite guide](docs/en/translation-memory.md): initialization, legacy JSON migration, verification, authority switching, and rollback.
+
 ## Quick start
 
 ### 1. Start the Dashboard (recommended)
@@ -53,10 +74,10 @@ python -m pip install -e ".[publish-all]"
 The Dashboard is the preferred entry point for everyday work: start local tasks, inspect runs, locate QA issues, submit human revisions, and trigger incremental rebuilds. After installation, start it immediately with the bundled example:
 
 ```powershell
-localizer dashboard projects/example/project.yaml --host 127.0.0.1 --port 8765
+localizer dashboard projects/example/project.yaml --host 127.0.0.1 --port 8080
 ```
 
-Then open <http://127.0.0.1:8765>. The Dashboard can open without an API key, but machine translation tasks require the project configuration and credentials described below. Write operations are enabled only on a loopback address.
+Then open <http://127.0.0.1:8080>. The Dashboard can open without an API key, but machine translation tasks require the project configuration and credentials described below. Write operations are enabled only on a loopback address.
 
 ### 2. Prepare the project directory
 
@@ -224,11 +245,22 @@ The command validates source-text fingerprints, reuses still-valid results from 
 
 ### Multiple resource variants
 
-A project can declare multiple resource directories under `paths.sources` and select one using `paths.default_variant` or the CLI's `--variant` option. Each variant has its own run and output directories, while sharing the same TM, glossary, and rule set.
+A project can declare multiple resource directories under `paths.sources` and select one using `paths.default_variant` or the CLI's `--variant` option. The Dashboard exposes the same choice as a resource-environment selector. GET APIs use `?variant=<name>`; write APIs, preflight, task snapshots, and presets use a `variant` field. Each variant has its own run and output directories while sharing the same TM, glossary, rules, and serialized task queue.
 
 ```powershell
 localizer build projects/my-game/project.yaml --variant beta --mode preview --run-id beta-001
 ```
+
+To vary the public artifact name and publish path with the resource variant:
+
+```yaml
+build:
+  variant_overrides:
+    stable: {variant: desktop, compatibility_env: DESKTOP}
+    beta: {variant: beta, compatibility_env: BETA}
+```
+
+This mapping controls the artifact name, release slug, versioned upload directory, and compatibility `metadata.json` environment together.
 
 ### Copy an existing release artifact only
 
@@ -245,6 +277,20 @@ SQLite is the authoritative source for runtime translations and human revisions.
 - Human-reviewed records have higher priority than machine results and cannot be silently overwritten by bulk operations.
 - Machine translations are committed as production records only after passing the quality gate.
 - Every change retains its origin, state, run identifier, and audit information.
+
+New projects do not need hand-written SQL or a pre-created database. The first write workflow, such as `localizer build`, creates the parent directory, SQLite file, schema, and indexes. Creating the schema does not make preview candidates formal; formal writes still follow the build mode and QualityGate. See the [TM and SQLite guide](docs/en/translation-memory.md).
+
+If you only have existing translated resources and no old TM, inspect a supported resource structure directly or import neutral Seed files:
+
+```powershell
+# Dry-run existing translations that configured adapters can read
+localizer tm-bootstrap-resources projects/my-game/project.yaml
+
+# Convert an unknown structure to one or more neutral TM Seed files
+localizer tm-import-seed projects/my-game/project.yaml path/to/ui-seed.json path/to/items-seed.json
+```
+
+After reviewing a clean report, add `--apply --accepted-by <operator>`. See [Build TM from existing translations](docs/en/tm-bootstrap.md) for the format and single-/multi-file examples.
 
 When migrating from a legacy system, synchronize and verify first, then switch the authoritative source:
 

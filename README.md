@@ -4,7 +4,7 @@
 
 # Game Localizer
 
-**简体中文** | [English](README.en.md) | [日本語](README.ja.md)
+**简体中文** | [English](README.en.md)
 
 Game Localizer 是一个面向游戏文本的本地化流水线。它把资源扫描、翻译记忆、机器翻译、质量检查、人工修订、制品构建和发布收敛到同一套可追踪流程中。
 
@@ -27,13 +27,24 @@ Game Localizer 是一个面向游戏文本的本地化流水线。它把资源�
 - Python 3.10 或更高版本
 - Git（用于版本管理；运行流水线本身不强制依赖远端仓库）
 
-安装开发版本：
+第一次在本地使用时，建议先创建隔离环境，再安装完整功能集。Windows PowerShell：
 
 ```powershell
-python -m pip install -e .
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -e ".[all]"
 ```
 
-按需安装可选能力：
+也可以使用 Conda：
+
+```powershell
+conda env create -f environment.yml
+conda activate game_localizer
+python -m pip install -e ".[all]"
+```
+
+`.[all]` 是首次使用的推荐选项，包含 Hugging Face tokenizer、AES 制品和全部远端发布适配器。如果希望保持最小安装，可使用 `python -m pip install -e .`，再按需安装：
 
 ```powershell
 # AES-256 加密制品
@@ -46,6 +57,16 @@ python -m pip install -e ".[tokenizer-huggingface]"
 python -m pip install -e ".[publish-all]"
 ```
 
+`tokenizer-huggingface` 是“条件必选项”：只要 `project.yaml` 中保留了 `provider.tokenizer`，运行分析或翻译前就必须安装它；删除整个 `tokenizer` 配置块后，程序会改用无需额外依赖的保守 token 估算器。详见[首次安装](docs/getting-started.md#选择安装方式)。
+
+## 文档
+
+- [首次安装与第一次运行](docs/getting-started.md)：venv/Conda、安装选项、配置凭据和首轮验证。
+- [通用使用指南](docs/usage.md)：从资源扫描、预览、人工复核到正式构建和发布。
+- [`project.yaml` 配置说明](docs/project-configuration.md)：按语义解释所有配置段、常见取值和适用场景。
+- [从存量汉化资源构建 TM](docs/tm-bootstrap.md)：直接读取受支持资源，或把未知结构转换成中立 TM Seed。
+- [TM 与 SQLite 指南](docs/translation-memory.md)：新建 TM、旧 JSON 转 SQLite、核验、权威源切换与回滚。
+
 ## 快速开始
 
 ### 1. 启动 Dashboard（推荐）
@@ -53,10 +74,10 @@ python -m pip install -e ".[publish-all]"
 Dashboard 是日常工作的首选入口，用于启动本地任务、查看运行状态、定位 QA 问题、提交人工修订和发起增量重建。安装后可直接使用仓库自带示例启动：
 
 ```powershell
-localizer dashboard projects/example/project.yaml --host 127.0.0.1 --port 8765
+localizer dashboard projects/example/project.yaml --host 127.0.0.1 --port 8080
 ```
 
-然后访问 <http://127.0.0.1:8765>。Dashboard 可以在未配置 API 密钥时打开，但执行机器翻译前仍需完成下面的项目配置与凭据设置。写操作仅在回环地址启用。
+然后访问 <http://127.0.0.1:8080>。Dashboard 可以在未配置 API 密钥时打开，但执行机器翻译前仍需完成下面的项目配置与凭据设置。写操作仅在回环地址启用。
 
 ### 2. 准备项目目录
 
@@ -224,11 +245,22 @@ localizer rebuild-from-run projects/my-game/project.yaml `
 
 ### 多资源变体
 
-项目可以在 `paths.sources` 中声明多个资源目录，并使用 `paths.default_variant` 或 CLI 的 `--variant` 选择。各变体拥有独立运行目录和输出目录，但共享同一个 TM、术语表与规则集。
+项目可以在 `paths.sources` 中声明多个资源目录，并使用 `paths.default_variant` 或 CLI 的 `--variant` 选择。Dashboard 可在页面的“资源环境”下拉框直接切换；GET API 使用 `?variant=<name>`，写 API、预检、任务快照和任务预设使用同名 `variant` 字段。各变体拥有独立运行目录和输出目录，但共享同一个 TM、术语表与规则集，所有变体任务仍进入同一个串行队列。
 
 ```powershell
 localizer build projects/my-game/project.yaml --variant beta --mode preview --run-id beta-001
 ```
+
+需要让公开包名和发布目录随资源变体切换时，可配置：
+
+```yaml
+build:
+  variant_overrides:
+    stable: {variant: ru, compatibility_env: RU}
+    beta: {variant: pt, compatibility_env: PT}
+```
+
+该映射同步控制制品名、release slug、版本化上传目录和兼容 `metadata.json` 的 `env`。
 
 ### 仅复制已有正式制品
 
@@ -245,6 +277,20 @@ SQLite 是运行时和人工修订的权威源。正式写入遵循以下原则�
 - 人工审核记录的优先级高于机器结果，批量操作不能静默覆盖。
 - 机器译文只有通过质量闸门后才能提交为正式记录。
 - 每次变更保留来源、状态、运行标识和审计信息。
+
+新项目不需要手工执行 SQL 或预建数据库：`tm.database` 的父目录和 SQLite 表会在第一次运行 `localizer build` 等写流程时自动创建。创建数据库结构不等于机器候选已经成为正式记录；正式写入仍受构建模式和质量闸门约束。完整流程和检查命令见 [TM 与 SQLite 指南](docs/translation-memory.md)。
+
+如果只有一批已经汉化的资源、没有旧 TM，可以直接预检受支持格式，或导入转换后的中立 Seed：
+
+```powershell
+# 从 project.yaml 中 adapter 能读取的已有译文生成报告（默认不写库）
+localizer tm-bootstrap-resources projects/my-game/project.yaml
+
+# 未知结构先转换成 TM Seed；可一次传入多个文件（默认不写库）
+localizer tm-import-seed projects/my-game/project.yaml path/to/ui-seed.json path/to/items-seed.json
+```
+
+报告确认无误后增加 `--apply --accepted-by <操作者>`。具体格式、单文件与多文件示例见[从存量汉化资源构建 TM](docs/tm-bootstrap.md)。
 
 从旧系统迁移时，先同步和核验，再进行权威源切换：
 

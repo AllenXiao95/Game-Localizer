@@ -173,7 +173,6 @@ class BoundaryTextIsConsistentTests(unittest.TestCase):
         "src/localizer/web/static/index.html",
         "README.md",
         "README.en.md",
-        "README.ja.md",
     )
 
     def test_no_file_still_claims_the_old_boundary(self) -> None:
@@ -189,7 +188,6 @@ class BoundaryTextIsConsistentTests(unittest.TestCase):
         expected = {
             "README.md": "单人定点修订",
             "README.en.md": "targeted single-user revision",
-            "README.ja.md": "単一ユーザーによる個別修正",
         }
         for name, phrase in expected.items():
             with self.subTest(file=name):

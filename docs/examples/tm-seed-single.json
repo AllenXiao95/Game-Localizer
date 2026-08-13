@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "defaults": {
+    "adapter_id": "paratranz_json",
+    "relative_path": "ui/menu.json"
+  },
+  "entries": [
+    {
+      "logical_key": "menu.start",
+      "source_text": "Start Game",
+      "translation": "开始游戏",
+      "context": "main menu button"
+    },
+    {
+      "logical_key": "menu.exit",
+      "source_text": "Exit",
+      "translation": "退出"
+    }
+  ]
+}
