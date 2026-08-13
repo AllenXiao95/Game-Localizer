@@ -54,6 +54,10 @@ class StaleFormalEntryError(RuntimeError):
     然后一直跑到 render 之后才在 `validate_promotable_run` 炸出来。
     """
 
+    def __init__(self, message: str, identities: Sequence[str] = ()) -> None:
+        super().__init__(message)
+        self.identities = tuple(str(value) for value in identities if value)
+
 
 @dataclass(frozen=True)
 class RebuildPlan:
@@ -552,11 +556,18 @@ class ProjectRunner:
                     # 又不许重试，整轮白跑。把失败点提到 render 之前。
                     preview = ", ".join(sorted(rejected)[:10])
                     more = f"（另有 {len(rejected) - 10} 条）" if len(rejected) > 10 else ""
+                    variant_hint = (
+                        f" --variant {self.config.active_variant}"
+                        if self.config.active_variant
+                        else ""
+                    )
                     raise StaleFormalEntryError(
                         f"{len(rejected)} 个坐标在 TM 里已是 formal，但源文已经变了，"
                         f"本次翻译结果无法写入：{preview}{more}\n"
                         f"这些是上一轮 release 晋升过、之后源文又被改动的条目。"
-                        f"用 `localizer review-retire --stale <config>` 清掉它们再重跑。"
+                        f"先用 `localizer review-retire --stale <config>"
+                        f"{variant_hint}` 预览，再加 `--apply` 清理后恢复同一 run_id。",
+                        rejected,
                     )
 
             build = LocalBuildPipeline(

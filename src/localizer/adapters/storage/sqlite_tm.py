@@ -362,6 +362,43 @@ class SQLiteTranslationMemory:
             )
             return cursor.rowcount
 
+    def retire_stale_formal_entries(
+        self,
+        entries: Sequence[TMEntry],
+        *,
+        expected_identities: Optional[Sequence[str]] = None,
+    ) -> int:
+        """删除源文指纹已经变化的 formal 行，让当前资源重新接管这些坐标。
+
+        调用方必须先向操作者展示候选并取得明确确认。删除条件在同一事务里
+        重新校验 ``is_formal`` 和旧指纹，避免预览后 TM 发生变化时误删新结果。
+        """
+        candidates = {
+            entry.stable_identity: entry.source_fingerprint
+            for entry in entries
+            if entry.stable_identity and entry.source_fingerprint
+        }
+        if not candidates:
+            return 0
+        removed = 0
+        with self.transaction() as connection:
+            for identity, current_fingerprint in candidates.items():
+                cursor = connection.execute(
+                    "DELETE FROM tm_entries "
+                    "WHERE stable_identity = ? AND is_formal = 1 "
+                    "AND source_fingerprint <> ?",
+                    (identity, current_fingerprint),
+                )
+                removed += cursor.rowcount
+            if expected_identities is not None:
+                expected = {str(value) for value in expected_identities if value}
+                if removed != len(expected):
+                    raise RuntimeError(
+                        f"stale formal candidates changed during retirement: "
+                        f"removed {removed}/{len(expected)}; transaction rolled back"
+                    )
+        return removed
+
     def restore_rows(self, snapshots: Sequence[dict]) -> int:
         """撤销专用：按前像还原。快照的 `row` 为 None 表示当时这个坐标没有行。
 

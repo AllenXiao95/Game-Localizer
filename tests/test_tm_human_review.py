@@ -224,6 +224,25 @@ class StaleFormalTests(_TMCase):
         )
         self.assertEqual(("stale",), stale)
 
+    def test_retire_stale_formal_rechecks_fingerprint_in_delete_transaction(self) -> None:
+        self.tm.upsert(_row("stale", is_formal=True, run_id="old"))
+        self.tm.upsert(_row("fresh", is_formal=True, run_id="old"))
+        self.tm.upsert(_row("draft", is_formal=False, run_id="old"))
+
+        removed = self.tm.retire_stale_formal_entries(
+            [
+                _row("stale", source_fingerprint="fp-2", run_id="new"),
+                _row("fresh", source_fingerprint="fp-1", run_id="new"),
+                _row("draft", source_fingerprint="fp-2", run_id="new"),
+            ]
+        )
+
+        self.assertEqual(1, removed)
+        remaining = self.tm.rows_for(["stale", "fresh", "draft"])
+        self.assertNotIn("stale", remaining)
+        self.assertIn("fresh", remaining)
+        self.assertIn("draft", remaining)
+
     def test_successful_writes_are_not_reported_as_rejected(self) -> None:
         rejected = self.tm.upsert_many(
             [_row("a", translation="一"), _row("b", translation="二")]

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 
@@ -13,8 +15,16 @@ from localizer.adapters.storage.glossary import GlossaryRepository
 from localizer.adapters.storage.sqlite_tm import (
     AuthoritySwitchRefused,
     SQLiteTranslationMemory,
+    TMGuardError,
+    TMEntry,
 )
 from localizer.migrations.legacy_tm import LegacyTMExporter, LegacyTMSynchronizer
+from localizer.migrations.tm_seed import (
+    TMSeedImporter,
+    TMSeedImportRefused,
+    TMSeedLoader,
+    write_seed_report,
+)
 from localizer.migrations.accepted_artifact import (
     AcceptedArtifactAdopter,
     AcceptedArtifactVerifier,
@@ -209,6 +219,103 @@ def tm_sync_legacy(
             activate_write_guard=True,
         )
     typer.echo(json.dumps(report.__dict__, ensure_ascii=False, indent=2))
+
+
+@app.command("tm-bootstrap-resources")
+def tm_bootstrap_resources(
+    config: Path = typer.Argument(..., exists=True, dir_okay=False),
+    variant: Optional[str] = typer.Option(None, "--variant"),
+    apply: bool = typer.Option(
+        False, "--apply", help="Write validated translations to SQLite; default is dry-run."
+    ),
+    accepted_by: str = typer.Option(
+        "", "--accepted-by", help="Human attesting that the existing localization is reviewed."
+    ),
+    backup: Optional[Path] = typer.Option(None, "--backup", dir_okay=False),
+    report: Optional[Path] = typer.Option(None, "--report", dir_okay=False),
+) -> None:
+    """从配置适配器能读取的存量汉化资源建立正式 SQLite TM。"""
+    try:
+        loaded = load_project_config(config).for_variant(variant)
+        resources = ProjectRunner(loaded)._resources()
+        units = tuple(unit for resource in resources for unit in resource.units)
+        sources = tuple(resource.source for resource in resources)
+        report_path = report or (
+            loaded.paths.workspace / "reports" / "tm-bootstrap-resources.json"
+        )
+        importer = TMSeedImporter(
+            loaded.tm.database,
+            validation_rule=load_validation_rule(
+                loaded.rules.file, source_locale=loaded.languages.source
+            ),
+            glossary_terms=GlossaryRepository(loaded.glossary.file).load(),
+        )
+        if apply:
+            payload = importer.apply(
+                units,
+                accepted_by=accepted_by,
+                source_files=sources,
+                backup_path=backup,
+                report_path=report_path,
+            )
+        else:
+            payload, _entries = importer.analyze(units, source_files=sources)
+            write_seed_report(report_path, payload)
+    except (TMSeedImportRefused, TMGuardError, OSError, ValueError) as exc:
+        typer.echo(f"refusing resource TM bootstrap: {exc}", err=True)
+        raise typer.Exit(code=2)
+    typer.echo(json.dumps(payload.as_dict(), ensure_ascii=False, indent=2))
+
+
+@app.command("tm-import-seed")
+def tm_import_seed(
+    config: Path = typer.Argument(..., exists=True, dir_okay=False),
+    seeds: List[Path] = typer.Argument(..., exists=True, dir_okay=False),
+    variant: Optional[str] = typer.Option(None, "--variant"),
+    apply: bool = typer.Option(
+        False, "--apply", help="Write validated seed rows to SQLite; default is dry-run."
+    ),
+    accepted_by: str = typer.Option(
+        "", "--accepted-by", help="Human attesting that the seed translations are reviewed."
+    ),
+    backup: Optional[Path] = typer.Option(None, "--backup", dir_okay=False),
+    report: Optional[Path] = typer.Option(None, "--report", dir_okay=False),
+) -> None:
+    """把一个或多个中立 TM Seed JSON 文件导入 SQLite。"""
+    try:
+        loaded = load_project_config(config).for_variant(variant)
+        loader = TMSeedLoader(
+            project_id=loaded.project.id,
+            source_locale=loaded.languages.source,
+            target_locale=loaded.languages.target,
+            adapter_ids=(item.type for item in loaded.resources.adapters),
+        )
+        units = loader.load_many(seeds)
+        report_path = report or (
+            loaded.paths.workspace / "reports" / "tm-seed-import.json"
+        )
+        importer = TMSeedImporter(
+            loaded.tm.database,
+            validation_rule=load_validation_rule(
+                loaded.rules.file, source_locale=loaded.languages.source
+            ),
+            glossary_terms=GlossaryRepository(loaded.glossary.file).load(),
+        )
+        if apply:
+            payload = importer.apply(
+                units,
+                accepted_by=accepted_by,
+                source_files=seeds,
+                backup_path=backup,
+                report_path=report_path,
+            )
+        else:
+            payload, _entries = importer.analyze(units, source_files=seeds)
+            write_seed_report(report_path, payload)
+    except (TMSeedImportRefused, TMGuardError, OSError, ValueError) as exc:
+        typer.echo(f"refusing TM Seed import: {exc}", err=True)
+        raise typer.Exit(code=2)
+    typer.echo(json.dumps(payload.as_dict(), ensure_ascii=False, indent=2))
 
 
 @app.command("tm-export-legacy")
@@ -527,6 +634,101 @@ def qa_accept_debt(
         )
 
 
+@app.command("review-retire")
+def review_retire(
+    config: Path = typer.Argument(..., exists=True, dir_okay=False),
+    stale: bool = typer.Option(
+        False,
+        "--stale",
+        help="查找 formal 但源文指纹已变化的 TM 条目。",
+    ),
+    variant: Optional[str] = typer.Option(
+        None,
+        "--variant",
+        help="多资源项目要检查的资源 variant。",
+    ),
+    apply: bool = typer.Option(
+        False,
+        "--apply",
+        help="确认删除预览出的 stale formal 条目；默认只读预览。",
+    ),
+    backup: Optional[Path] = typer.Option(
+        None,
+        "--backup",
+        help="应用前的 SQLite 备份路径；不填时写入 TM 同级 backups 目录。",
+    ),
+) -> None:
+    """退役已不对应当前源文的 formal TM 条目，使 checkpoint 能安全恢复。"""
+    if not stale:
+        raise typer.BadParameter("currently only --stale retirement is supported")
+    loaded = load_project_config(config)
+    if loaded.paths.variants or variant is not None:
+        loaded = loaded.for_variant(variant)
+
+    plan = ProjectRunner(loaded).plan()
+    candidates = [
+        TMEntry(
+            stable_identity=unit.stable_identity,
+            project_id=unit.project_id,
+            adapter_id=unit.adapter_id,
+            relative_path=unit.relative_path,
+            logical_key=unit.logical_key,
+            source_text=unit.source_text,
+            source_fingerprint=unit.source_fingerprint,
+            translation=unit.translation or "",
+            origin="machine",
+            review_state="unreviewed",
+            match_scope="coordinate",
+        )
+        for resource in plan.resources
+        for unit in resource.units
+    ]
+    with SQLiteTranslationMemory(loaded.tm.database) as tm:
+        identities = tm.stale_formal_identities(candidates)
+        rows = tm.rows_for(identities)
+        details = [
+            {
+                "stable_identity": identity,
+                "relative_path": rows[identity]["relative_path"],
+                "logical_key": rows[identity]["logical_key"],
+                "origin": rows[identity]["origin"],
+            }
+            for identity in identities
+            if identity in rows
+        ]
+        result = {
+            "variant": loaded.active_variant,
+            "stale_formal": len(identities),
+            "applied": False,
+            "removed": 0,
+            "backup": None,
+            "entries": details,
+        }
+        if apply and identities:
+            backup_path = backup or (
+                loaded.tm.database.parent
+                / "backups"
+                / (
+                    "tm-before-review-retire-"
+                    + datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+                    + ".sqlite3"
+                )
+            )
+            backup_path = Path(backup_path).expanduser().resolve()
+            if backup_path.exists():
+                raise typer.BadParameter(f"backup already exists: {backup_path}")
+            backup_path.parent.mkdir(parents=True, exist_ok=True)
+            destination = sqlite3.connect(str(backup_path))
+            try:
+                tm.connection.backup(destination)
+            finally:
+                destination.close()
+            result["backup"] = str(backup_path)
+            result["removed"] = tm.retire_stale_formal_entries(candidates)
+            result["applied"] = True
+    typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
+
+
 @app.command("dashboard")
 def dashboard(
     config: Path = typer.Argument(..., exists=True, dir_okay=False),
@@ -545,8 +747,8 @@ def dashboard(
     也不改 ParaTranz stage。批量人工翻译与校对统一在 ParaTranz 完成。
     任务启动只在回环地址启用；改 --host 对外展示时会自动关闭写接口。
 
-    多目录项目一次只看一个变体：run 落在 `<workspace>/<variant>/` 下，
-    不投影的话面板会正常打开然后显示「没有运行」。
+    多目录项目启动时先投影一个默认变体，随后可在页面直接切换；run 始终落在
+    `<workspace>/<variant>/` 下，避免不同资源环境互相覆盖。
     """
     from localizer.web import DashboardServer
     from localizer.web.server import (
