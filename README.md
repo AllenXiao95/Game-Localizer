@@ -10,6 +10,10 @@ Game Localizer 是一个面向游戏文本的本地化流水线，而不是机�
 
 项目以声明式配置驱动，适合单个游戏、多资源目录和多版本持续更新。默认使用 SQLite 作为翻译记忆（TM）的权威数据源。
 
+## 生产实践背景
+
+Game Localizer 源于对《坦克世界》（Mir Tankov）俄服中文本地化的多年持续维护；相关汉化资源与发布元数据公开维护在 [`tanki-i18n-metadata`](https://github.com/AllenXiao95/tanki-i18n-metadata)。本框架将经过真实游戏版本更新验证的资源处理、质量检查和制品发布实践抽象为可复用流水线，以服务更多游戏和社区汉化项目。
+
 ## 主要能力
 
 - 支持 Gettext PO/MO、ParaTranz JSON 和 Paradox YAML 资源。

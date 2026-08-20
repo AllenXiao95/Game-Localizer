@@ -10,6 +10,10 @@ Game Localizer is a localization pipeline for game text, not a machine-translati
 
 The project is driven by declarative configuration and supports individual games, multiple resource directories, and continuous updates across versions. By default, SQLite is used as the authoritative data source for translation memory (TM).
 
+## Production background
+
+Game Localizer grew out of several years of maintaining Chinese localization for the live-service game *Mir Tankov*; the localization resources and release metadata are maintained publicly in [`tanki-i18n-metadata`](https://github.com/AllenXiao95/tanki-i18n-metadata). The framework generalizes resource processing, quality assurance, and artifact publishing practices validated through real game updates into a reusable pipeline for other games and community localization projects.
+
 ## Key features
 
 - Supports Gettext PO/MO, ParaTranz JSON, and Paradox YAML resources.
