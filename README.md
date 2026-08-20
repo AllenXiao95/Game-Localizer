@@ -6,7 +6,7 @@
 
 **简体中文** | [English](README.en.md)
 
-Game Localizer 是一个面向游戏文本的本地化流水线。它把资源扫描、翻译记忆、机器翻译、质量检查、人工修订、制品构建和发布收敛到同一套可追踪流程中。
+Game Localizer 是一个面向游戏文本的本地化流水线，而不是机器翻译工具。它把资源扫描、翻译记忆、模型辅助翻译、质量检查、人工修订、制品构建和发布收敛到同一套可追踪流程中。
 
 项目以声明式配置驱动，适合单个游戏、多资源目录和多版本持续更新。默认使用 SQLite 作为翻译记忆（TM）的权威数据源。
 
@@ -15,7 +15,7 @@ Game Localizer 是一个面向游戏文本的本地化流水线。它把资源�
 - 支持 Gettext PO/MO、ParaTranz JSON 和 Paradox YAML 资源。
 - 通过 OpenAI-compatible 接口接入翻译模型，并支持并发、限流和本地 tokenizer。
 - 以稳定坐标和源文指纹管理 SQLite TM，避免源文变化后误用旧译文。
-- 区分机器译文、人工定稿和历史迁移记录，保护已审核内容。
+- 区分模型生成译文、人工定稿和历史迁移记录，保护已审核内容。
 - 提供占位符、源语言残留、术语、过滤和规范化检查。
 - 支持 `preview` 与 `release` 两种构建模式；正式制品必须通过 QualityGate。
 - 保存运行状态、检查点、报告和清单，可恢复失败运行或从父运行增量重建。
@@ -77,7 +77,7 @@ Dashboard 是日常工作的首选入口，用于启动本地任务、查看运�
 localizer dashboard projects/example/project.yaml --host 127.0.0.1 --port 8080
 ```
 
-然后访问 <http://127.0.0.1:8080>。Dashboard 可以在未配置 API 密钥时打开，但执行机器翻译前仍需完成下面的项目配置与凭据设置。写操作仅在回环地址启用。
+然后访问 <http://127.0.0.1:8080>。Dashboard 可以在未配置 API 密钥时打开，但执行模型辅助翻译前仍需完成下面的项目配置与凭据设置。写操作仅在回环地址启用。
 
 ### 2. 准备项目目录
 
@@ -232,7 +232,7 @@ localizer dashboard projects/my-game/project.yaml --host 127.0.0.1 --port 8765
 
 ### 从父运行增量重建
 
-适合正式检查失败后已经人工修复、又不希望重复请求全部机器翻译的场景：
+适合正式检查失败后已经人工修复、又不希望重新请求模型生成全部译文的场景：
 
 ```powershell
 localizer rebuild-from-run projects/my-game/project.yaml `
@@ -369,12 +369,12 @@ python -m pre_commit run --all-files
 
 ## 许可证
 
-本项目采用 [PolyForm Noncommercial License 1.0.0](LICENSE)，以源码可用（source-available）方式发布：
+本项目以自由软件形式按 [GNU General Public License v3.0 或任何后续版本](LICENSE)发布（SPDX：`GPL-3.0-or-later`）：
 
-- 可在协议定义的非商业场景中使用、研究、修改和分发。
-- 商业使用不在公开许可范围内，必须事先另行取得许可方授权。
-- 由于限制商业用途，本项目不是 OSI 定义下的开源软件。
-- 本协议适用于随该 `LICENSE` 分发的版本；已经依其他许可证取得的历史版本，其既有授权不会被追溯撤销。
+- 你可以使用、研究、修改和再分发本项目。
+- 分发本项目或其衍生作品时，必须遵守 GPL 的完整条款，包括提供相应源代码并保留版权与许可声明。
+- 本软件不提供任何担保；责任限制以 GPL 正文为准。
+- `GPL-3.0-or-later` 适用于随当前 `LICENSE` 分发的版本；历史版本已经取得的许可不会被追溯撤销。
 - 第三方依赖和外部资源继续遵循各自的许可证。
 
 完整、具有约束力的条款以 [LICENSE](LICENSE) 为准。

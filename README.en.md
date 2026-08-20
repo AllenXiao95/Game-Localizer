@@ -6,7 +6,7 @@
 
 [简体中文](README.md) | **English**
 
-Game Localizer is a localization pipeline for game text. It brings resource scanning, translation memory, machine translation, quality assurance, human revision, artifact building, and publishing together in one traceable workflow.
+Game Localizer is a localization pipeline for game text, not a machine-translation tool. It brings resource scanning, translation memory, model-assisted translation, quality assurance, human revision, artifact building, and publishing together in one traceable workflow.
 
 The project is driven by declarative configuration and supports individual games, multiple resource directories, and continuous updates across versions. By default, SQLite is used as the authoritative data source for translation memory (TM).
 
@@ -15,7 +15,7 @@ The project is driven by declarative configuration and supports individual games
 - Supports Gettext PO/MO, ParaTranz JSON, and Paradox YAML resources.
 - Connects to translation models through an OpenAI-compatible API, with concurrency, rate limiting, and local tokenizer support.
 - Manages the SQLite TM using stable coordinates and source-text fingerprints, preventing outdated translations from being reused after the source changes.
-- Distinguishes machine translations, human-approved translations, and historical migration records to protect reviewed content.
+- Distinguishes model-generated translations, human-approved translations, and historical migration records to protect reviewed content.
 - Provides checks for placeholders, residual source-language text, terminology, filtering, and normalization.
 - Supports `preview` and `release` build modes; release artifacts must pass the QualityGate.
 - Preserves run state, checkpoints, reports, and manifests, allowing failed runs to resume or builds to be incrementally recreated from a parent run.
@@ -77,7 +77,7 @@ The Dashboard is the preferred entry point for everyday work: start local tasks,
 localizer dashboard projects/example/project.yaml --host 127.0.0.1 --port 8080
 ```
 
-Then open <http://127.0.0.1:8080>. The Dashboard can open without an API key, but machine translation tasks require the project configuration and credentials described below. Write operations are enabled only on a loopback address.
+Then open <http://127.0.0.1:8080>. The Dashboard can open without an API key, but model-assisted translation tasks require the project configuration and credentials described below. Write operations are enabled only on a loopback address.
 
 ### 2. Prepare the project directory
 
@@ -232,7 +232,7 @@ Human revisions made in the Dashboard record the operator and an append-only dec
 
 ### Incrementally rebuild from a parent run
 
-This is useful when a release check has failed and the issues have been corrected manually, but you do not want to request every machine translation again:
+This is useful when a release check has failed and the issues have been corrected manually, but you do not want to request a complete new set of model-generated translations:
 
 ```powershell
 localizer rebuild-from-run projects/my-game/project.yaml `
@@ -369,12 +369,12 @@ python -m pre_commit run --all-files
 
 ## License
 
-This project is distributed as source-available software under the [PolyForm Noncommercial License 1.0.0](LICENSE):
+This project is free software licensed under the [GNU General Public License v3.0 or later](LICENSE) (SPDX: `GPL-3.0-or-later`):
 
-- You may use, study, modify, and distribute it in the noncommercial scenarios defined by the license.
-- Commercial use is outside the public license and requires prior, separate authorization from the licensor.
-- Because commercial use is restricted, this project is not open-source software under the OSI definition.
-- This license applies to versions distributed with this `LICENSE`; existing grants for historical versions obtained under other licenses are not retroactively revoked.
+- You may use, study, modify, and redistribute the project.
+- Distribution of the project or derivative works must follow the complete GPL terms, including the corresponding-source and notice requirements.
+- The software is provided without warranty; the complete GPL text governs warranty disclaimers and limitations of liability.
+- `GPL-3.0-or-later` applies to versions distributed with the current `LICENSE`; licenses already granted for historical versions are not retroactively revoked.
 - Third-party dependencies and external resources remain subject to their respective licenses.
 
 See [LICENSE](LICENSE) for the complete, legally binding terms.
