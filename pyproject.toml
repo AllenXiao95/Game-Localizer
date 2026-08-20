@@ -7,6 +7,9 @@ name = "game-localizer"
 version = "0.1.0"
 description = "Game localization preprocessing, translation, QA, and publishing framework"
 license = { file = "LICENSE" }
+classifiers = [
+  "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+]
 requires-python = ">=3.10"
 dependencies = [
   "polib>=1.2",
