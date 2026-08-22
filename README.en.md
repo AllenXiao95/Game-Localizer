@@ -365,6 +365,26 @@ python -m pre_commit run --all-files
 - [Example rules](projects/example/rules.yaml)
 - [Example Gettext resource](projects/example/source/messages.po)
 
+## Roadmap
+
+The next proposed milestone is **M8: Agentic Workflows and Desktop Client**. Without
+weakening the existing deterministic validation, QualityGate, audit, or human-authorization
+boundaries, it adds a controlled agent orchestration layer for TM inspection and repair
+proposals, foundational Prompt material construction and evaluation, and preview/release build
+orchestration. It also plans to ship a desktop client that reuses the existing WebUI and Python
+business kernel through **Tauri + a Python sidecar**, without requiring users to install Python.
+
+M8 will also build or compliantly reuse a versioned i18n Prompt evaluation set with documented
+provenance and licensing. It will cover placeholders, terminology, semantics, register,
+formatting, locale conventions, and response protocols. Agents will not receive arbitrary shell,
+SQLite, or publishing access. Formal TM writes, release, and publish will continue to require
+deterministic preflight checks, recoverable backups, plan fingerprints, and explicit human
+confirmation.
+
+See [M8 Agentic Workflows and Tauri Client Design](docs/en/milestone-m8-agent-client.md) for the
+complete scope, architecture, delivery stages, and acceptance criteria. This milestone is
+currently a design proposal; the described capabilities are not yet implemented.
+
 ## Current limitations
 
 - The configuration model and offline synchronization components for community-platform workflows exist, but an online API client has not yet been implemented.

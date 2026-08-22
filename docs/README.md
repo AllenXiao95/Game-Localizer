@@ -12,6 +12,10 @@
 4. [从存量汉化资源构建 TM](tm-bootstrap.md)
 5. [TM 与 SQLite 指南](translation-memory.md)
 
+规划中的工程里程碑：
+
+- [M8 Agent 化工作流与 Tauri 客户端设计](milestone-m8-agent-client.md)
+
 如果只想解决常见问题：
 
 - 启动前是否需要 venv/Conda：见[首次安装](getting-started.md#创建隔离环境)。

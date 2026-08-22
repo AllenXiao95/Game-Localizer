@@ -365,6 +365,23 @@ python -m pre_commit run --all-files
 - [示例规则](projects/example/rules.yaml)
 - [示例 Gettext 资源](projects/example/source/messages.po)
 
+## 后续路线图
+
+下一里程碑拟推进 **M8：Agent 化工作流与桌面客户端**。它在不削弱现有确定性校验、
+QualityGate、审计和人工授权边界的前提下，增加受控 Agent 编排层，用于 TM 体检与修复
+提案、Prompt 基础材料构建与评估、preview/release 构建编排；同时计划以
+**Tauri + Python sidecar** 复用现有 WebUI 和 Python 业务内核，发布无需用户自行安装
+Python 的桌面客户端。
+
+M8 还将建设或合规复用一套带版本、来源和许可信息的 i18n Prompt 评估集，覆盖占位符、
+术语、语义、语域、格式、本地化习惯和响应协议等维度。Agent 不直接获得任意 shell、
+SQLite 或发布权限；TM 正式写入、release 与 publish 继续要求确定性预检、可恢复备份、
+计划指纹和显式人工确认。
+
+完整范围、架构、阶段拆分和验收标准见
+[M8 Agent 化工作流与 Tauri 客户端设计](docs/milestone-m8-agent-client.md)。该里程碑目前是
+设计提案，不表示相关能力已经实现。
+
 ## 当前边界
 
 - 社区平台工作流的配置模型与离线同步组件已存在，但在线 API 客户端尚未实现。
