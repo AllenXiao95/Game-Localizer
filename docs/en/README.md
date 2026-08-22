@@ -12,6 +12,10 @@ Read in this order:
 4. [Build TM from existing translations](tm-bootstrap.md)
 5. [TM and SQLite guide](translation-memory.md)
 
+Planned engineering milestone:
+
+- [M8 Agentic Workflows and Tauri Client Design](milestone-m8-agent-client.md)
+
 Common questions:
 
 - venv or Conda: [Create an isolated environment](getting-started.md#create-an-isolated-environment).
