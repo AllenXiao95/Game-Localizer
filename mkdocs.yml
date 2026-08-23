@@ -24,10 +24,12 @@ theme:
         icon: material/brightness-4
         name: 切换到浅色模式
   features:
-    - navigation.tabs
     - navigation.sections
+    - navigation.expand
+    - navigation.path
     - navigation.tracking
     - navigation.top
+    - toc.follow
     - search.highlight
     - search.suggest
     - content.code.copy
