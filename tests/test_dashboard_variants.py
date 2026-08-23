@@ -180,7 +180,9 @@ class MultiVariantDashboardTests(unittest.TestCase):
             # 单目录项目不该凭空长出变体概念，工作区也不该多一层子目录。
             self.assertEqual("", overview["project"]["active_variant"])
             self.assertEqual([], overview["project"]["variants"])
-            self.assertEqual(str(root / "ws"), str(collector.config.paths.workspace))
+            self.assertTrue(
+                (root / "ws").samefile(Path(collector.config.paths.workspace))
+            )
             self.assertEqual(["r1"], [r["run_id"] for r in collector.list_runs()])
 
 
@@ -325,7 +327,7 @@ class MultiVariantOverHttpTests(unittest.TestCase):
         self.assertEqual(200, status)
         self.assertEqual("pts", preflight["variant"])
         self.assertEqual("pts", captured["variant"])
-        self.assertEqual(self.root / "pts", captured["source"])
+        self.assertTrue((self.root / "pts").samefile(captured["source"]))
 
     def test_unknown_variant_is_a_bad_request(self) -> None:
         with self.assertRaises(urllib.error.HTTPError) as ctx:
