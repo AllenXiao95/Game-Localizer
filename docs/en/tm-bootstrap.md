@@ -176,7 +176,7 @@ localizer tm-import-seed projects/my-project/project.yaml `
   docs/examples/tm-seed-multi/item-names.json
 ```
 
-Copy the shared [`../examples/tm-seed-multi`](../examples/tm-seed-multi) examples. Inputs are merged before validation. A repeated `adapter_id + relative_path + logical_key`, including across files, produces `duplicate_coordinate`.
+Copy the shared [`examples/tm-seed-multi`](https://github.com/AllenXiao95/Game-Localizer/tree/master/docs/examples/tm-seed-multi) examples. Inputs are merged before validation. A repeated `adapter_id + relative_path + logical_key`, including across files, produces `duplicate_coordinate`.
 
 ### Dry-run and apply
 

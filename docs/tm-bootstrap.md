@@ -176,7 +176,7 @@ localizer tm-import-seed projects/my-project/project.yaml `
   docs/examples/tm-seed-multi/item-names.json
 ```
 
-可复制示例见 [`examples/tm-seed-multi`](examples/tm-seed-multi)。所有输入会先合并校验；跨文件出现相同 `adapter_id + relative_path + logical_key` 时会报 `duplicate_coordinate`。
+可复制示例见 [`examples/tm-seed-multi`](https://github.com/AllenXiao95/Game-Localizer/tree/master/docs/examples/tm-seed-multi)。所有输入会先合并校验；跨文件出现相同 `adapter_id + relative_path + logical_key` 时会报 `duplicate_coordinate`。
 
 ### dry-run 与正式导入
 

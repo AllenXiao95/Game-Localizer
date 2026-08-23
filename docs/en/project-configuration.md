@@ -4,7 +4,7 @@
 
 `project.yaml` defines what to translate, which rules/provider to use, and where results go. It does not store secrets or run state. The schema is strict: unknown, misspelled, and invalid field combinations fail `validate-config`. Relative paths are resolved from the directory containing the YAML file.
 
-Start by copying [`projects/example/project.yaml`](../../projects/example/project.yaml). Do not enable remote publishing, AES, or legacy migration until the minimal local workflow works.
+Start by copying [`projects/example/project.yaml`](https://github.com/AllenXiao95/Game-Localizer/blob/master/projects/example/project.yaml). Do not enable remote publishing, AES, or legacy migration until the minimal local workflow works.
 
 ## Readable minimal configuration
 
@@ -154,7 +154,7 @@ Paradox YAML `locale_folders` maps locale identifiers to safe directory names.
 
 ### `glossary`
 
-`file` points to glossary YAML. An empty glossary still has `schema_version: 1` and `terms: []`. `auto_discovery` is `candidate_only` (discoveries never auto-promote to mandatory terms) or `disabled`. Terms can specify exact/word matching, locales, review state, provenance, and path scope. See [`projects/example/glossary.yaml`](../../projects/example/glossary.yaml).
+`file` points to glossary YAML. An empty glossary still has `schema_version: 1` and `terms: []`. `auto_discovery` is `candidate_only` (discoveries never auto-promote to mandatory terms) or `disabled`. Terms can specify exact/word matching, locales, review state, provenance, and path scope. See [`projects/example/glossary.yaml`](https://github.com/AllenXiao95/Game-Localizer/blob/master/projects/example/glossary.yaml).
 
 ### `rules`
 
@@ -164,7 +164,7 @@ Paradox YAML `locale_folders` maps locale identifiers to safe directory names.
 schema_version: 1
 ```
 
-Rules can define a source-language residue profile/allowlist, adapter/path/key/source filters, and scoped normalization regexes. Filtered entries are neither sent to the model nor included in QA. See [`projects/example/rules.yaml`](../../projects/example/rules.yaml).
+Rules can define a source-language residue profile/allowlist, adapter/path/key/source filters, and scoped normalization regexes. Filtered entries are neither sent to the model nor included in QA. See [`projects/example/rules.yaml`](https://github.com/AllenXiao95/Game-Localizer/blob/master/projects/example/rules.yaml).
 
 ### `provider`
 

@@ -27,6 +27,7 @@ publish-oss = ["oss2>=2.18"]
 publish-all = ["boto3>=1.26", "oss2>=2.18"]
 artifact-aes = ["pyzipper>=0.3.6"]
 tokenizer-huggingface = ["transformers>=4"]
+docs = ["mkdocs-material>=9.6,<10"]
 # Recommended for a first local checkout. Keep this list explicit so editable
 # installs work with pip versions that do not support composing extras.
 all = [
