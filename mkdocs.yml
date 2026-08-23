@@ -1,0 +1,79 @@
+site_name: Game Localizer
+site_description: 可追踪、可审计的游戏文本本地化流水线
+site_url: https://allenxiao95.github.io/Game-Localizer/
+repo_url: https://github.com/AllenXiao95/Game-Localizer
+repo_name: AllenXiao95/Game-Localizer
+edit_uri: edit/master/docs/
+
+theme:
+  name: material
+  language: zh
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: blue
+      toggle:
+        icon: material/brightness-7
+        name: 切换到深色模式
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: blue
+      toggle:
+        icon: material/brightness-4
+        name: 切换到浅色模式
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.tracking
+    - navigation.top
+    - search.highlight
+    - search.suggest
+    - content.code.copy
+
+plugins:
+  - search:
+      lang:
+        - zh
+        - en
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - pymdownx.details
+  - pymdownx.superfences
+  - toc:
+      permalink: true
+
+nav:
+  - 首页: index.md
+  - 开始使用:
+      - 首次安装: getting-started.md
+      - 使用指南: usage.md
+      - 项目配置: project-configuration.md
+  - 翻译记忆:
+      - 从存量资源构建 TM: tm-bootstrap.md
+      - TM 与 SQLite: translation-memory.md
+  - 设计:
+      - M8 Agent 与桌面客户端: milestone-m8-agent-client.md
+  - English:
+      - Overview: en/index.md
+      - Getting started: en/getting-started.md
+      - Usage: en/usage.md
+      - Project configuration: en/project-configuration.md
+      - Build TM from existing resources: en/tm-bootstrap.md
+      - TM and SQLite: en/translation-memory.md
+      - M8 agent and desktop client: en/milestone-m8-agent-client.md
+
+extra:
+  alternate:
+    - name: 简体中文
+      link: /Game-Localizer/
+      lang: zh
+    - name: English
+      link: /Game-Localizer/en/
+      lang: en
+
+copyright: Copyright &copy; Game Localizer contributors · GPL-3.0-or-later

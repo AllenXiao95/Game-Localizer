@@ -8,7 +8,7 @@
 
 配置使用严格 schema：未知字段、拼错字段和不合法组合会在 `validate-config` 阶段报错。所有相对路径均以 `project.yaml` 所在目录为基准。
 
-先从 [`projects/example/project.yaml`](../projects/example/project.yaml) 复制，再按本文修改。不要一开始就启用远端发布、AES 或旧系统迁移等高级能力。
+先从 [`projects/example/project.yaml`](https://github.com/AllenXiao95/Game-Localizer/blob/master/projects/example/project.yaml) 复制，再按本文修改。不要一开始就启用远端发布、AES 或旧系统迁移等高级能力。
 
 ## 一份可读的最小配置
 
@@ -177,7 +177,7 @@ Paradox YAML 的 `locale_folders` 是 `locale: 安全目录名` 映射，用于�
 | `file` | 无 | 术语 YAML 路径。即使没有术语，也应提供 `schema_version: 1` 和空 `terms`。 |
 | `auto_discovery` | `candidate_only` | `candidate_only` 表示自动发现结果只能作为候选，不能自动晋升为强制术语；`disabled` 关闭候选发现策略。 |
 
-术语自身可声明 exact/word 匹配、locale、审核状态、来源及可选路径 scope。参考 [`projects/example/glossary.yaml`](../projects/example/glossary.yaml)。
+术语自身可声明 exact/word 匹配、locale、审核状态、来源及可选路径 scope。参考 [`projects/example/glossary.yaml`](https://github.com/AllenXiao95/Game-Localizer/blob/master/projects/example/glossary.yaml)。
 
 ### `rules`
 
@@ -187,7 +187,7 @@ Paradox YAML 的 `locale_folders` 是 `locale: 安全目录名` 映射，用于�
 schema_version: 1
 ```
 
-可配置源语言残留画像、允许保留词、按 adapter/path/key/source 过滤的条目，以及按 adapter/path 生效的规范化正则。参考 [`projects/example/rules.yaml`](../projects/example/rules.yaml)。过滤规则会让命中项不送模型也不参与 QA，应谨慎使用。
+可配置源语言残留画像、允许保留词、按 adapter/path/key/source 过滤的条目，以及按 adapter/path 生效的规范化正则。参考 [`projects/example/rules.yaml`](https://github.com/AllenXiao95/Game-Localizer/blob/master/projects/example/rules.yaml)。过滤规则会让命中项不送模型也不参与 QA，应谨慎使用。
 
 ### `provider`
 
