@@ -13,10 +13,10 @@ jobs:
         pydantic: ["pydantic>=1.10,<2", "pydantic>=2,<3"]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.10"
           cache: pip
@@ -25,12 +25,22 @@ jobs:
           python -m pip install -e .
           python -m pip install "${{ matrix.pydantic }}"
       - name: Run tests
-        run: python -X utf8 -m unittest discover -s tests
+        shell: pwsh
+        run: |
+          $testOutput = & python -X utf8 -m unittest discover -s tests 2>&1
+          $testExitCode = $LASTEXITCODE
+          $testOutput | ForEach-Object { Write-Host $_ }
+          if ($testExitCode -ne 0) {
+            $tail = ($testOutput | Select-Object -Last 120) -join "`n"
+            $escaped = $tail.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+            Write-Host "::error title=Unit test failure::$escaped"
+            exit $testExitCode
+          }
 
   secret-scan:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
       - name: Scan full history with gitleaks
