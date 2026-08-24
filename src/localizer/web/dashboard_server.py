@@ -15,8 +15,16 @@ from . import server as _legacy
 
 _I18N_MARKER = "<!-- localizer-dashboard-i18n -->"
 _WORKFLOW_MARKER = "<!-- localizer-dashboard-workflow-ux -->"
-_I18N_CATALOGS = ("i18n-additions.json", "workflow-i18n.json")
-_WORKFLOW_SCRIPTS = ("workflow-ux.js", "workflow-publish-ux.js")
+_I18N_CATALOGS = (
+    "i18n-additions.json",
+    "workflow-i18n.json",
+    "workflow-publish-i18n.json",
+)
+_WORKFLOW_SCRIPTS = (
+    "workflow-ux.js",
+    "workflow-locale-bridge.js",
+    "workflow-publish-ux.js",
+)
 
 
 def _augment_runtime(script: str) -> str:
