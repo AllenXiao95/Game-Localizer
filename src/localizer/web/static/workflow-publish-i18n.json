@@ -17,6 +17,7 @@
     ["重试发布到已配置目标", "Retry publish to configured targets"],
     ["上次发布未完全成功；重试会生成新的 run 级回执。", "The previous publish did not fully succeed; retrying creates a new run-scoped receipt."],
     ["上次发布未完全成功；查看下方 target 原因后再重试。", "The previous publish did not fully succeed; inspect target-level reasons below before retrying."],
+    ["发布任务", "Publish task"],
     ["上传", "Uploaded"],
     ["跳过", "Skipped"]
   ]
