@@ -356,7 +356,7 @@
   function skipTextNode(node) {
     const parent = node.parentElement;
     if (!parent) return true;
-    return Boolean(parent.closest("script,style,pre,code,textarea,.mono,[data-i18n-raw]"));
+    return Boolean(parent.closest("#localeToggle,script,style,pre,code,textarea,.mono,[data-i18n-raw]"));
   }
 
   function desiredText(source) {
@@ -380,7 +380,7 @@
   }
 
   function processAttributes(element, allowSourceRefresh) {
-    if (!(element instanceof Element)) return;
+    if (!(element instanceof Element) || element.id === "localeToggle") return;
     let saved = attrOriginal.get(element);
     if (!saved) {
       saved = new Map();
