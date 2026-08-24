@@ -27,12 +27,9 @@ jobs:
   build:
     name: Build and validate distribution
     runs-on: ubuntu-latest
-    outputs:
-      publish-ref: ${{ steps.resolve-ref.outputs.ref }}
-      version: ${{ steps.verify-metadata.outputs.version }}
     steps:
       - name: Resolve source ref
-        id: resolve-ref
+        id: resolve_ref
         shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -65,7 +62,7 @@ jobs:
       - name: Check out release tag
         uses: actions/checkout@v6
         with:
-          ref: ${{ steps.resolve-ref.outputs.ref }}
+          ref: ${{ steps.resolve_ref.outputs.ref }}
           fetch-depth: 0
 
       - name: Set up Python for packaging
@@ -75,10 +72,9 @@ jobs:
           cache: pip
 
       - name: Verify tag matches package metadata
-        id: verify-metadata
         shell: bash
         env:
-          PUBLISH_REF: ${{ steps.resolve-ref.outputs.ref }}
+          PUBLISH_REF: ${{ steps.resolve_ref.outputs.ref }}
         run: |
           set -euo pipefail
           expected="${PUBLISH_REF#v}"
@@ -93,8 +89,6 @@ jobs:
           if version != expected:
               raise SystemExit(f"Tag/package version mismatch: tag={expected}, pyproject={version}")
           print(f"Verified package version {version}")
-          with pathlib.Path(__import__("os").environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as fh:
-              fh.write(f"version={version}\n")
           PY
 
       - name: Build and validate distributions
