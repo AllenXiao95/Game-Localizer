@@ -60,6 +60,7 @@ nav:
       - TM 与 SQLite: translation-memory.md
   - 设计:
       - M8 Agent 与桌面客户端: milestone-m8-agent-client.md
+      - M8 EvalCase v1 契约: m8-evalcase-v1-contract.md
   - English:
       - Overview: en/index.md
       - Getting started: en/getting-started.md
@@ -68,6 +69,7 @@ nav:
       - Build TM from existing resources: en/tm-bootstrap.md
       - TM and SQLite: en/translation-memory.md
       - M8 agent and desktop client: en/milestone-m8-agent-client.md
+      - M8 EvalCase v1 contract: en/m8-evalcase-v1-contract.md
 
 extra:
   alternate:
