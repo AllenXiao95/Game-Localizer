@@ -75,10 +75,10 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
 
-      - name: Set up Python
+      - name: Set up Python for release tooling
         uses: actions/setup-python@v6
         with:
-          python-version: "3.10"
+          python-version: "3.11"
 
       - name: Verify release metadata
         shell: bash
