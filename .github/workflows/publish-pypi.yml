@@ -1,20 +1,13 @@
 name: Publish Python package to PyPI
 
 on:
-  # One-time bootstrap for the already-published GitHub v0.1.0 release.
-  # Remove this push trigger after the first successful PyPI upload.
-  push:
-    branches: [master]
-    paths:
-      - ".github/workflows/publish-pypi.yml"
   release:
     types: [published]
   workflow_dispatch:
     inputs:
       ref:
-        description: "Git tag/ref to publish"
+        description: "Git tag/ref to publish (for example v0.1.1)"
         required: true
-        default: "v0.1.0"
 
 permissions:
   contents: read
@@ -44,17 +37,13 @@ jobs:
             workflow_dispatch)
               ref="$MANUAL_REF"
               ;;
-            push)
-              # Bootstrap only: publish the existing GitHub v0.1.0 tag.
-              ref="v0.1.0"
-              ;;
             *)
               echo "Unsupported event: $EVENT_NAME" >&2
               exit 1
               ;;
           esac
           if [[ ! "$ref" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
-            echo "Ref must be a version tag such as v0.1.0; got: $ref" >&2
+            echo "Ref must be a version tag such as v0.1.1; got: $ref" >&2
             exit 1
           fi
           echo "ref=$ref" >> "$GITHUB_OUTPUT"
