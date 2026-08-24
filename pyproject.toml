@@ -59,5 +59,5 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-# 观测面板是单文件自包含页面，必须随包分发，否则 `localizer dashboard` 只能在源码树里跑。
-"localizer.web" = ["static/*.html"]
+# Dashboard HTML plus the injected locale runtime must ship in wheels/sdists.
+"localizer.web" = ["static/*.html", "static/*.js"]
