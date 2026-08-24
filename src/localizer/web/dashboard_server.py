@@ -1,9 +1,9 @@
-"""Dashboard HTTP wrapper that injects the client-side i18n runtime.
+"""Dashboard HTTP wrapper that injects client-side i18n and workflow UX runtimes.
 
-The existing dashboard is intentionally kept as a single self-contained operator surface. Rather
-than duplicating its task/review/build behavior for each language, this wrapper injects a locale
-layer into the rendered HTML. The locale layer only changes presentation text and attributes; it
-never rebuilds task forms or review editors, so switching language cannot discard operator state.
+The existing dashboard remains a self-contained operator surface. The i18n layer runs before the
+legacy dashboard script so its DOM mutations are localized in place. The workflow UX layer runs
+after the legacy script so it can safely decorate existing state/render functions without
+reimplementing task, review, build, or publish authority.
 """
 from __future__ import annotations
 
@@ -14,7 +14,9 @@ from typing import Optional
 from . import server as _legacy
 
 _I18N_MARKER = "<!-- localizer-dashboard-i18n -->"
+_WORKFLOW_MARKER = "<!-- localizer-dashboard-workflow-ux -->"
 _I18N_CATALOG = "i18n-additions.json"
+_WORKFLOW_SCRIPT = "workflow-ux.js"
 
 
 def _augment_runtime(script: str) -> str:
@@ -45,13 +47,7 @@ def _augment_runtime(script: str) -> str:
 
 
 def inject_dashboard_i18n(html: str) -> str:
-    """Inject one locale runtime into one dashboard document.
-
-    The legacy page formats numbers and the refresh clock with a hard-coded ``zh-CN`` locale.
-    Replace only those formatting calls, merge the long-form copy catalog into the core runtime,
-    then run that runtime *before* the dashboard's own script. Existing render functions keep
-    working unchanged while all subsequent DOM mutations are translated in place.
-    """
+    """Inject one locale engine before the legacy dashboard script."""
     if _I18N_MARKER in html:
         return html
 
@@ -71,8 +67,24 @@ def inject_dashboard_i18n(html: str) -> str:
     return rendered.replace("</body>", runtime + "</body>", 1)
 
 
+def inject_dashboard_workflow(html: str) -> str:
+    """Inject workflow navigation after the legacy dashboard definitions are available."""
+    if _WORKFLOW_MARKER in html:
+        return html
+    script = (_legacy.STATIC_ROOT / _WORKFLOW_SCRIPT).read_text(encoding="utf-8")
+    runtime = f"{_WORKFLOW_MARKER}\n<script>\n{script}\n</script>\n"
+    if "</body>" in html:
+        return html.replace("</body>", runtime + "</body>", 1)
+    return html + runtime
+
+
+def render_dashboard_html(html: str) -> str:
+    """Apply presentation-only dashboard extensions in deterministic order."""
+    return inject_dashboard_workflow(inject_dashboard_i18n(html))
+
+
 class _I18nHandler(_legacy._Handler):
-    """Serve the normal API surface, but localize the dashboard HTML shell."""
+    """Serve the normal API surface, but enhance the dashboard HTML shell."""
 
     def _static(self, name: str, content_type: str) -> None:
         if name != "index.html":
@@ -82,12 +94,12 @@ class _I18nHandler(_legacy._Handler):
         if not path.is_file():
             super()._static(name, content_type)
             return
-        body = inject_dashboard_i18n(path.read_text(encoding="utf-8")).encode("utf-8")
+        body = render_dashboard_html(path.read_text(encoding="utf-8")).encode("utf-8")
         self._send(body, content_type)
 
 
 class DashboardServer(_legacy.DashboardServer):
-    """DashboardServer using the i18n-aware request handler.
+    """DashboardServer using the enhanced request handler.
 
     The base class constructs its ``ThreadingHTTPServer`` synchronously. Temporarily replacing the
     module-level handler during that construction makes the resulting ``partial`` capture our
