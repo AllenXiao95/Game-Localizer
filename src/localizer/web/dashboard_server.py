@@ -1,8 +1,8 @@
 """Dashboard HTTP wrapper that injects client-side i18n and workflow UX runtimes.
 
 The existing dashboard remains a self-contained operator surface. The i18n layer runs before the
-legacy dashboard script so its DOM mutations are localized in place. The workflow UX layer runs
-after the legacy script so it can safely decorate existing state/render functions without
+legacy dashboard script so its DOM mutations are localized in place. Workflow UX layers run after
+the legacy script so they can safely decorate existing state/render functions without
 reimplementing task, review, build, or publish authority.
 """
 from __future__ import annotations
@@ -16,7 +16,7 @@ from . import server as _legacy
 _I18N_MARKER = "<!-- localizer-dashboard-i18n -->"
 _WORKFLOW_MARKER = "<!-- localizer-dashboard-workflow-ux -->"
 _I18N_CATALOGS = ("i18n-additions.json", "workflow-i18n.json")
-_WORKFLOW_SCRIPT = "workflow-ux.js"
+_WORKFLOW_SCRIPTS = ("workflow-ux.js", "workflow-publish-ux.js")
 
 
 def _augment_runtime(script: str) -> str:
@@ -70,11 +70,15 @@ def inject_dashboard_i18n(html: str) -> str:
 
 
 def inject_dashboard_workflow(html: str) -> str:
-    """Inject workflow navigation after the legacy dashboard definitions are available."""
+    """Inject workflow layers after the legacy dashboard definitions are available."""
     if _WORKFLOW_MARKER in html:
         return html
-    script = (_legacy.STATIC_ROOT / _WORKFLOW_SCRIPT).read_text(encoding="utf-8")
-    runtime = f"{_WORKFLOW_MARKER}\n<script>\n{script}\n</script>\n"
+    scripts = [
+        (_legacy.STATIC_ROOT / name).read_text(encoding="utf-8")
+        for name in _WORKFLOW_SCRIPTS
+    ]
+    blocks = "\n".join(f"<script>\n{script}\n</script>" for script in scripts)
+    runtime = f"{_WORKFLOW_MARKER}\n{blocks}\n"
     if "</body>" in html:
         return html.replace("</body>", runtime + "</body>", 1)
     return html + runtime
