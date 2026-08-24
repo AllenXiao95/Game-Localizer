@@ -220,9 +220,9 @@
       .pipeline .journey-stage[data-state="idle"] { opacity:.65; }
       .pipeline .journey-stage[data-state="not-applicable"] { opacity:.45; border-style:dashed; }
       .pipeline .journey-stage:focus-visible, .run:focus-visible, .tabs button:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
-      .tabs::before { content:"工作流"; color:var(--muted); font-size:11px; align-self:center; margin-right:3px; }
+      .tabs .tab-group-label { color:var(--muted); font-size:11px; align-self:center; margin-right:3px; }
       .tabs .diagnostic-tab { opacity:.72; border-style:dashed; }
-      .tabs .diagnostic-tab:first-of-type { margin-left:8px; }
+      .tabs .diagnostic-first { margin-left:8px; }
       .tabs .diagnostic-tab[aria-selected="true"] { opacity:1; border-style:solid; }
       .run .stage-line { display:flex; gap:6px; align-items:center; margin-top:4px; }
       .ux-disabled-reason { font-size:12px; color:var(--muted); }
@@ -365,6 +365,13 @@
     tabs.setAttribute("aria-label", "运行工作流视图");
     const buttons = [...tabs.querySelectorAll("button[data-tab]")];
     const byKey = new Map(buttons.map((button) => [button.dataset.tab, button]));
+    let groupLabel = tabs.querySelector(".tab-group-label");
+    if (!groupLabel) {
+      groupLabel = document.createElement("span");
+      groupLabel.className = "tab-group-label";
+      groupLabel.textContent = "工作流";
+      tabs.insertBefore(groupLabel, tabs.firstChild);
+    }
     for (const key of ["summary", "live", "qa", "review", "artifact", "batches", "files"]) {
       const button = byKey.get(key);
       if (button) tabs.appendChild(button);
@@ -374,6 +381,7 @@
       button.setAttribute("aria-controls", "tabBody");
       button.tabIndex = button.dataset.tab === activeTab ? 0 : -1;
       button.classList.toggle("diagnostic-tab", ["batches", "files"].includes(button.dataset.tab));
+      button.classList.toggle("diagnostic-first", button.dataset.tab === "batches");
     });
   }
 
@@ -418,16 +426,20 @@
       : "自动刷新已暂停；表单和 Review 输入保持不变。";
   }
 
+  function localized(text) {
+    return window.LocalizerI18n?.translateText(text) || text;
+  }
+
   function applyControlScopes() {
     for (const [id, scope] of Object.entries(CONTROL_SCOPE)) {
       const button = $(id);
       if (!button) continue;
       button.dataset.uxScope = scope;
-      button.setAttribute("aria-description", `影响对象：${scope}`);
+      button.setAttribute("aria-description", localized(`影响对象：${scope}`));
     }
     document.querySelectorAll("[data-unify]").forEach((button) => {
       button.dataset.uxScope = "当前同源多译组的全部 TM 坐标";
-      button.setAttribute("aria-description", `影响对象：${button.dataset.uxScope}`);
+      button.setAttribute("aria-description", localized(`影响对象：${button.dataset.uxScope}`));
     });
   }
 
@@ -514,8 +526,8 @@
         event.preventDefault(); event.stopImmediatePropagation();
       }
     }, true);
-    $("reviewQueue")?.addEventListener("click", (event) => {
-      const row = event.target.closest(".qitem[data-idx]");
+    $("tabBody")?.addEventListener("click", (event) => {
+      const row = event.target.closest("#reviewQueue .qitem[data-idx]");
       if (!row || Number(row.dataset.idx) === review.selected) return;
       if (!guardReviewNavigation()) {
         event.preventDefault(); event.stopImmediatePropagation();
