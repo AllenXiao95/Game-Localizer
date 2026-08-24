@@ -425,7 +425,10 @@ function publishSummary(target) {
   // 旧回执没有 objects，更旧的回执有 objects 但没有 skipped 字段。
   // 前者退回 target:status；后者 undefined 一律当成"没跳过"，
   // 也就是按老口径全算上传 —— 这是唯一不会误导的降级。
-  if (!objects.length) return `${target.target}:${target.status}`;
+  if (!objects.length) {
+    const reason = target.error_message ? `（${target.error_message}）` : "";
+    return `${target.target}:${target.status}${reason}`;
+  }
   const skipped = objects.filter((o) => o.skipped).length;
   const moved = objects.length - skipped;
   return `${target.target}:${target.status}(上传 ${moved}/跳过 ${skipped})`;
@@ -863,6 +866,16 @@ function viewBatches() {
 function viewArtifact() {
   const a = detail.artifact;
   if (!a?.available) return unavailable(a);
+  const policy = overview?.publish_security;
+  const policyClass = policy?.state === "blocked" ? "err"
+    : policy?.state === "ready" ? "ok" : "warn";
+  const policyLabel = policy?.state === "blocked" ? "远端发布已拦截"
+    : policy?.state === "ready" ? "远端发布可执行" : "仅本地发布";
+  const remoteTargets = policy?.remote_targets?.length
+    ? `目标：${policy.remote_targets.join(" / ")}。` : "";
+  const policyNotice = policy
+    ? `<div class="note"><span class="chip ${policyClass}">${policyLabel}</span>
+        ${esc(remoteTargets + policy.message)}</div>` : "";
   const meta = Object.entries(a.metadata || {}).map(([k, v]) =>
     `<tr><td class="muted">${esc(k)}</td><td class="mono">${esc(
       typeof v === "object" ? JSON.stringify(v) : v)}</td></tr>`).join("");
@@ -874,6 +887,7 @@ function viewArtifact() {
       <dt>创建于</dt><dd class="mono">${esc(a.created_at)}</dd>
       <dt>Manifest</dt><dd class="mono">${esc(a.manifest)}</dd>
     </dl>
+    ${policyNotice}
     <div class="rowflex" style="margin:14px 0">
       <button class="action" id="publishRelease" type="button"
         ${a.quality_gate_passed && a.exists ? "" : "disabled"}>发布到全部已配置目标</button>

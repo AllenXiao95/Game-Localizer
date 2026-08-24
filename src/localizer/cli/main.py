@@ -509,7 +509,7 @@ def publish_all(
     loaded = load_project_config(config)
     if not loaded.publish.targets:
         raise typer.BadParameter("config.publish.targets is empty; nothing to publish")
-    # 治理闸门：M0 凭据轮换未完成时，所有非 local 目标被拒（fail-closed）。
+    # 显式声明凭据轮换事件后，在轮换完成前拒绝所有非 local 目标。
     results = PublishOrchestrator(security=loaded.security).publish(
         ReleaseBundle.load(manifest), loaded.publish
     )

@@ -34,9 +34,8 @@ def publisher_from_config(
 ) -> Publisher:
     """Construct a Publisher. Calling this for a remote target reads credentials, but does not connect.
 
-    `security` 是 M0 退出约束一的闸门。传 None 表示「本次调用不做治理判定」——
-    只有直接把本函数当库用的地方才该这样；生产路径（CLI → PublishOrchestrator）
-    一律带上配置里的 SecuritySection，因此默认 fail-closed。
+    `security` 是显式凭据事件的闸门。生产路径会传入项目配置；只有配置声明
+    `credential_rotation_required: true` 且轮换尚未完成时才拦截远端目标。
     """
     if target.type != "local" and security is not None:
         # 在**构造之前**拦下：构造 GitHubReleasePublisher 就已经把 token 从环境
@@ -135,8 +134,7 @@ class PublishOrchestrator:
     def __init__(
         self, factory=None, *, security: Optional[SecuritySection] = None
     ) -> None:
-        # 默认工厂始终带治理闸门，且默认的 SecuritySection 是**未完成轮换** ——
-        # 忘记传 security 的结果是「远端发不出去」，不是「远端畅通无阻」。
+        # 默认状态表示「没有声明凭据事件」；Provider 凭据与权限检查仍照常执行。
         self.factory = factory or partial(
             publisher_from_config, security=security or SecuritySection()
         )

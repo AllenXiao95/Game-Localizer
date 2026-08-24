@@ -246,7 +246,7 @@ Every mapping key must be declared in `paths.sources`.
 
 ### `security`
 
-`credential_rotation_completed_at` and `rotation_record` attest remote-publishing credential governance. Both are required when any remote target exists; local publishing does not need them. Never insert fake values merely to pass validation.
+`credential_rotation_required` defaults to `false`, meaning no credential leak or mandatory rotation has been declared; empty rotation records alone do not block remote publishing. Set it to `true` for a known leak, accidental credential commit, or mandatory rotation. Remote targets then stay fail-closed until both `credential_rotation_completed_at` and `rotation_record` are present. Never insert fake values merely to pass validation.
 
 ### `publish.targets[]`
 

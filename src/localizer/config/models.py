@@ -577,11 +577,13 @@ class GovernanceError(RuntimeError):
 
 
 class SecuritySection(StrictModel):
-    """凭据治理未完成时禁用一切远端发布目标。
+    """仅在明确声明凭据事件时拦截远端发布。
 
-    默认 fail-closed：不填 `credential_rotation_completed_at` 就发不了远端。
-    `local` 目标不受影响，因为本地打包不涉及远端凭据。
+    没有轮换记录不等于凭据已经泄露。普通项目默认允许进入远端发布流程；
+    已知泄露或被要求强制轮换时，显式打开闸门并保持 fail-closed。
     """
+
+    credential_rotation_required: bool = False
 
     # 六个控制台的凭据轮换全部完成的日期（ISO-8601）。填这一项等于**签字**：
     # 有人确认旧凭据已失效、新凭据只存在于环境变量里。
@@ -605,6 +607,8 @@ class SecuritySection(StrictModel):
 
     @property
     def remote_publishing_allowed(self) -> bool:
+        if not self.credential_rotation_required:
+            return True
         return bool(self.credential_rotation_completed_at and self.rotation_record)
 
     def assert_remote_publishing_allowed(self, target_type: str) -> None:
@@ -619,10 +623,12 @@ class SecuritySection(StrictModel):
             if not value
         ]
         raise GovernanceError(
-            f"remote publish target {target_type!r} is disabled: M0 凭据治理未完成"
-            f"（缺 security.{' 与 security.'.join(missing)}）。"
-            f"完成六套生产凭据轮换并留下记录后再填这两项；"
-            f"只想本地打包请把 publish.targets 收敛为 type: local。"
+            f"remote publish target {target_type!r} is blocked because "
+            "security.credential_rotation_required is true and the declared "
+            f"rotation is incomplete (missing security.{' and security.'.join(missing)}). "
+            "Complete and record the required rotation, or set "
+            "credential_rotation_required to false only after confirming that no "
+            "credential incident or mandatory rotation is active."
         )
 
 

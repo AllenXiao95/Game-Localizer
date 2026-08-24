@@ -152,6 +152,21 @@ class ReviewTabGuardsTests(unittest.TestCase):
         self.assertIn("max-height", rule.group(1))
 
 
+class PublishPolicyNoticeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.source = INDEX.read_text(encoding="utf-8")
+
+    def test_artifact_view_shows_policy_before_publishing(self) -> None:
+        self.assertIn("overview?.publish_security", self.source)
+        self.assertIn("远端发布已拦截", self.source)
+        self.assertIn("policy.message", self.source)
+
+    def test_failed_target_reason_is_not_hidden(self) -> None:
+        block = self.source[self.source.index("function publishSummary(") :]
+        block = block[: block.index("function renderTaskStatus()")]
+        self.assertIn("target.error_message", block)
+
+
 
 class BoundaryTextIsConsistentTests(unittest.TestCase):
     """边界改了，四处代码内文案与两份文档必须同时改（W12）。

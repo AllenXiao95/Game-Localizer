@@ -27,7 +27,12 @@ if str(SRC) not in sys.path:
 
 from localizer.application.quality_gate import QualityGateError, QualityGateResult
 from localizer.application.artifact import ArtifactBuilder
-from localizer.config.models import ProjectConfig, PublishSection, PublishTargetSection
+from localizer.config.models import (
+    ProjectConfig,
+    PublishSection,
+    PublishTargetSection,
+    SecuritySection,
+)
 from localizer.web.collector import DashboardCollector
 from localizer.web.server import DashboardServer
 
@@ -62,6 +67,36 @@ def _config(root: Path) -> ProjectConfig:
         if hasattr(ProjectConfig, "model_validate")
         else ProjectConfig.parse_obj(data)
     )
+
+
+class PublishSecurityOverviewTests(unittest.TestCase):
+    def _overview(self, *, rotation_required: bool) -> dict:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = _config(root)
+            config.publish = PublishSection(
+                targets=[
+                    PublishTargetSection(
+                        type="github_release",
+                        repository="owner/repo",
+                        token_env="GITHUB_TOKEN",
+                    )
+                ]
+            )
+            config.security = SecuritySection(
+                credential_rotation_required=rotation_required
+            )
+            return DashboardCollector(config, root / "project.yaml", ROOT).overview()
+
+    def test_normal_remote_publish_is_ready_without_assuming_a_leak(self) -> None:
+        policy = self._overview(rotation_required=False)["publish_security"]
+        self.assertEqual("ready", policy["state"])
+        self.assertIn("不启用轮换拦截", policy["message"])
+
+    def test_declared_rotation_event_is_visible_before_publish(self) -> None:
+        policy = self._overview(rotation_required=True)["publish_security"]
+        self.assertEqual("blocked", policy["state"])
+        self.assertIn("远端目标会被治理闸门拒绝", policy["message"])
 
 
 def _seed_run(root: Path, run_id: str = "run-1") -> None:
@@ -355,6 +390,10 @@ class ServerTests(unittest.TestCase):
         status, overview = self._get("/api/overview")
         self.assertEqual(200, status)
         self.assertEqual("game", overview["project"]["id"])
+        self.assertEqual("not_configured", overview["publish_security"]["state"])
+        self.assertFalse(
+            overview["publish_security"]["credential_rotation_required"]
+        )
 
         status, runs = self._get("/api/runs")
         self.assertEqual(1, len(runs["runs"]))

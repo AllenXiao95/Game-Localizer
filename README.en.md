@@ -61,7 +61,7 @@ mkdocs serve
 
 - Community-platform workflows currently have a configuration model and offline synchronization components, but no online API client.
 - The web dashboard targets local observability and targeted single-user revision, not multi-user approval workflows.
-- Remote publishing requires the relevant optional dependencies, environment credentials, and explicit governance configuration.
+- Remote publishing requires the relevant optional dependencies and environment credentials; the governance gate activates only for an explicitly declared credential-rotation event.
 - [M8 Agentic Workflows and the Tauri Client](docs/en/milestone-m8-agent-client.md) is currently a design proposal.
 
 ## License
