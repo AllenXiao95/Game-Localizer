@@ -7,30 +7,56 @@ never rebuilds task forms or review editors, so switching language cannot discar
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Optional
 
 from . import server as _legacy
 
 _I18N_MARKER = "<!-- localizer-dashboard-i18n -->"
-_I18N_SCRIPTS = ("i18n.js", "i18n-additions.js")
+_I18N_CATALOG = "i18n-additions.json"
+
+
+def _augment_runtime(script: str) -> str:
+    """Merge the prose catalog into the core runtime's PHRASES array.
+
+    Keeping one browser-side translation engine is important: a second MutationObserver can make
+    the first observer mistake translated English for a new source string, which breaks lossless
+    switching back to Chinese. Catalog data is therefore merged before the script executes.
+    """
+    payload = json.loads((_legacy.STATIC_ROOT / _I18N_CATALOG).read_text(encoding="utf-8"))
+    phrases = payload.get("phrases") or []
+    rendered = []
+    for pair in phrases:
+        if not isinstance(pair, list) or len(pair) != 2:
+            raise ValueError("dashboard i18n catalog phrases must be [source, target] pairs")
+        source, target = pair
+        rendered.append(
+            "    ["
+            + json.dumps(str(source), ensure_ascii=False)
+            + ", "
+            + json.dumps(str(target), ensure_ascii=False)
+            + "],"
+        )
+    needle = "  const PHRASES = [\n"
+    if needle not in script:
+        raise ValueError("dashboard i18n runtime has no PHRASES catalog insertion point")
+    return script.replace(needle, needle + "\n".join(rendered) + "\n", 1)
 
 
 def inject_dashboard_i18n(html: str) -> str:
-    """Inject locale runtimes into one dashboard document.
+    """Inject one locale runtime into one dashboard document.
 
     The legacy page formats numbers and the refresh clock with a hard-coded ``zh-CN`` locale.
-    Replace only those formatting calls, then run the i18n runtimes *before* the dashboard's own
-    script. The core runtime owns language/state mechanics; the additions layer covers long-form
-    workflow and review guidance without introducing a second page state.
+    Replace only those formatting calls, merge the long-form copy catalog into the core runtime,
+    then run that runtime *before* the dashboard's own script. Existing render functions keep
+    working unchanged while all subsequent DOM mutations are translated in place.
     """
     if _I18N_MARKER in html:
         return html
 
-    scripts = [
-        (_legacy.STATIC_ROOT / name).read_text(encoding="utf-8")
-        for name in _I18N_SCRIPTS
-    ]
+    script = (_legacy.STATIC_ROOT / "i18n.js").read_text(encoding="utf-8")
+    script = _augment_runtime(script)
     rendered = html.replace(
         'toLocaleString("zh-CN")',
         'toLocaleString(window.LocalizerI18n?.locale() || "zh-CN")',
@@ -38,8 +64,7 @@ def inject_dashboard_i18n(html: str) -> str:
         'toLocaleTimeString("zh-CN")',
         'toLocaleTimeString(window.LocalizerI18n?.locale() || "zh-CN")',
     )
-    script_blocks = "\n".join(f"<script>\n{script}\n</script>" for script in scripts)
-    runtime = f"{_I18N_MARKER}\n{script_blocks}\n"
+    runtime = f"{_I18N_MARKER}\n<script>\n{script}\n</script>\n"
     marker = "<script>"
     if marker in rendered:
         return rendered.replace(marker, runtime + marker, 1)
