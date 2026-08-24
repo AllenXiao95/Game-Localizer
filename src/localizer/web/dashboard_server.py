@@ -15,19 +15,21 @@ from . import server as _legacy
 
 _I18N_MARKER = "<!-- localizer-dashboard-i18n -->"
 _WORKFLOW_MARKER = "<!-- localizer-dashboard-workflow-ux -->"
-_I18N_CATALOG = "i18n-additions.json"
+_I18N_CATALOGS = ("i18n-additions.json", "workflow-i18n.json")
 _WORKFLOW_SCRIPT = "workflow-ux.js"
 
 
 def _augment_runtime(script: str) -> str:
-    """Merge the prose catalog into the core runtime's PHRASES array.
+    """Merge all prose catalogs into the core runtime's PHRASES array.
 
     Keeping one browser-side translation engine is important: a second MutationObserver can make
     the first observer mistake translated English for a new source string, which breaks lossless
     switching back to Chinese. Catalog data is therefore merged before the script executes.
     """
-    payload = json.loads((_legacy.STATIC_ROOT / _I18N_CATALOG).read_text(encoding="utf-8"))
-    phrases = payload.get("phrases") or []
+    phrases = []
+    for catalog in _I18N_CATALOGS:
+        payload = json.loads((_legacy.STATIC_ROOT / catalog).read_text(encoding="utf-8"))
+        phrases.extend(payload.get("phrases") or [])
     rendered = []
     for pair in phrases:
         if not isinstance(pair, list) or len(pair) != 2:
