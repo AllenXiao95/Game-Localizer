@@ -1,0 +1,23 @@
+{
+  "phrases": [
+    ["发布回执", "Publish receipt"],
+    ["发布进行中", "Publishing"],
+    ["发布未完全成功", "Publish incomplete"],
+    ["任务错误", "Task error"],
+    ["本次回执没有 target 结果", "This receipt has no target results"],
+    ["；请根据任务错误重试。", "; retry using the task error above."],
+    ["持久化回执", "Persisted receipt"],
+    ["开始", "Started"],
+    ["发布任务执行中", "Publish task running"],
+    ["当前 run 已有发布任务 queued/running，禁止重复提交。", "The selected run already has a queued/running publish task; duplicate submission is disabled."],
+    ["正在执行；等待 run 级回执。", "is running; waiting for the run-scoped receipt."],
+    ["重新发布（幂等）", "Republish (idempotent)"],
+    ["当前 run 已发布成功；重复发布仍会执行目标级幂等检查。", "The selected run published successfully; republishing still performs target-level idempotency checks."],
+    ["主工作流已完成；如需补发，可显式重新发布。", "The primary workflow is complete; republish explicitly only if a supplemental publish is needed."],
+    ["重试发布到已配置目标", "Retry publish to configured targets"],
+    ["上次发布未完全成功；重试会生成新的 run 级回执。", "The previous publish did not fully succeed; retrying creates a new run-scoped receipt."],
+    ["上次发布未完全成功；查看下方 target 原因后再重试。", "The previous publish did not fully succeed; inspect target-level reasons below before retrying."],
+    ["上传", "Uploaded"],
+    ["跳过", "Skipped"]
+  ]
+}
