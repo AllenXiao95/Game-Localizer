@@ -10,6 +10,23 @@
     "#groupDefer", "#unitCommit", "#unitDraft", "[data-unify]",
     "[data-cluster-check]", "#clusterRecheck", "#unitCheck"
   ].join(",");
+  const CONTROL_SCOPE = {
+    saveProfile: "本地任务预设",
+    preflightTask: "只读任务计划",
+    launchTask: "新的运行",
+    confirmPreflightStale: "SQLite TM 中的过期 formal 记录",
+    confirmRunStale: "当前运行与 SQLite TM",
+    launchRebuild: "新的不可变子运行",
+    publishRelease: "当前运行的全部已配置发布目标",
+    syncMajorities: "同源多译组对应的 TM 坐标",
+    clusterCommitChanged: "当前术语违规对应的 TM 坐标",
+    clusterExclude: "当前术语的 exclude_scope 规则",
+    groupCustomApply: "当前同源多译组的全部 TM 坐标",
+    groupSkip: "当前审查决策",
+    groupDefer: "当前审查决策",
+    unitCommit: "当前词条的 TM 坐标",
+    unitDraft: "当前审查草稿"
+  };
 
   let reviewDirty = false;
   let busyControls = new Set();
@@ -36,10 +53,22 @@
       };
     }
 
-    if (["queued", "running"].includes(snapshot.taskStatus) || RUN_STAGE_KEYS.has(snapshot.stageKey)) {
+    if (["queued", "running"].includes(snapshot.publishTaskStatus)) {
+      return {
+        id: "publish-running", label: "查看发布进度",
+        detail: "发布任务正在执行；结果会按当前 run 持久化。",
+        target: "publish", kind: "tab", tab: "artifact"
+      };
+    }
+
+    if (["queued", "running", "waiting_confirmation"].includes(snapshot.taskStatus)
+        || RUN_STAGE_KEYS.has(snapshot.stageKey)) {
       return {
         id: "live", label: "查看实时进度",
-        detail: "当前运行仍在处理资源或模型翻译。", target: "run", kind: "tab", tab: "live"
+        detail: snapshot.taskStatus === "waiting_confirmation"
+          ? "当前运行已暂停，等待处理过期 formal 记录后恢复。"
+          : "当前运行仍在处理资源或模型翻译。",
+        target: "run", kind: "tab", tab: "live"
       };
     }
 
@@ -118,16 +147,21 @@
   }
 
   function snapshot() {
-    const selectedTask = selectedRun
-      ? tasks.find((item) => item.run_id === selectedRun && ["queued", "running", "waiting_confirmation"].includes(item.status))
-      : null;
+    const liveTasks = selectedRun
+      ? tasks.filter((item) => item.run_id === selectedRun
+          && ["queued", "running", "waiting_confirmation"].includes(item.status))
+      : [];
+    const selectedPublishTask = liveTasks.find((item) => item.kind === "publish") || null;
+    const selectedRunTask = liveTasks.find((item) => item.kind !== "publish") || null;
     return {
       hasRun: Boolean(detail && selectedRun),
       hasPreflight: Boolean(currentPreflight),
       staleCount: Number(currentPreflight?.stale_formal?.count || 0),
       runId: selectedRun || "",
       activeTab,
-      taskStatus: selectedTask?.status || detail?.task?.status || "",
+      taskStatus: selectedRunTask?.status || detail?.task?.status || "",
+      publishTaskStatus: selectedPublishTask?.status || "",
+      publishTaskId: selectedPublishTask?.task_id || "",
       stageKey: detail?.stage?.key || "",
       stageState: detail?.stage?.state || "",
       stageNote: detail?.stage?.note || "",
@@ -146,13 +180,13 @@
   function stepStates(state) {
     const stage = state.stageKey;
     const hasRun = state.hasRun;
-    const runDone = hasRun && !RUN_STAGE_KEYS.has(stage);
     const validateDone = state.qaAvailable && state.qaPassed === true;
     const qaBlocked = state.qaAvailable && state.qaPassed === false;
     const artifact = state.artifactAvailable;
+    const publishRunning = ["queued", "running"].includes(state.publishTaskStatus)
+      || (state.publishAvailable && ["queued", "running"].includes(state.publishStatus));
     const published = state.publishAvailable && state.publishStatus === "completed" && state.publishPassed === true;
-    const publishBlocked = state.publishAvailable && !published
-      && !["queued", "running"].includes(state.publishStatus);
+    const publishBlocked = state.publishAvailable && !published && !publishRunning;
 
     return [
       ["prepare", "准备", hasRun || state.hasPreflight ? "done" : "ready"],
@@ -161,7 +195,7 @@
       ["validate", "验证", !hasRun || RUN_STAGE_KEYS.has(stage) ? "idle" : qaBlocked ? "blocked" : validateDone ? "done" : "running"],
       ["repair", "修复", qaBlocked ? "ready" : validateDone ? "not-applicable" : "idle"],
       ["build", "构建", artifact ? "done" : validateDone && state.mode === "release" ? "running" : state.mode === "preview" && validateDone ? "not-applicable" : "idle"],
-      ["publish", "发布", published ? "done" : publishBlocked ? "blocked" : state.publishAvailable ? "running" : artifact ? "ready" : "idle"]
+      ["publish", "发布", published ? "done" : publishBlocked ? "blocked" : publishRunning ? "running" : artifact ? "ready" : "idle"]
     ];
   }
 
@@ -191,7 +225,6 @@
       .tabs .diagnostic-tab:first-of-type { margin-left:8px; }
       .tabs .diagnostic-tab[aria-selected="true"] { opacity:1; border-style:solid; }
       .run .stage-line { display:flex; gap:6px; align-items:center; margin-top:4px; }
-      .ux-action-row { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-top:7px; }
       .ux-disabled-reason { font-size:12px; color:var(--muted); }
       [data-ux-busy="true"] { cursor:progress !important; opacity:.7; }
       [data-ux-busy="true"]::after { content:" ↻"; }
@@ -205,8 +238,6 @@
   function ensureContext() {
     const pipeline = $("pipeline");
     if (!pipeline) return null;
-    const section = pipeline.closest("section");
-    if (!section) return null;
     let node = $("workflowContext");
     if (!node) {
       node = document.createElement("div");
@@ -228,9 +259,11 @@
       : `<span>新任务</span>`;
     const lineage = state.parentRunId
       ? `<span class="chip">父运行 <span class="mono">${esc(state.parentRunId)}</span></span>` : "";
-    const stage = state.stageKey
-      ? `<span class="chip ${state.stageState === "blocked" ? "err" : state.stageState === "done" ? "ok" : "warn"}">${esc(state.stageKey)} · ${esc(state.stageState)}</span>`
-      : `<span class="chip">尚未启动</span>`;
+    const stage = state.publishTaskStatus
+      ? `<span class="chip warn">publish · ${esc(state.publishTaskStatus)}</span>`
+      : state.stageKey
+        ? `<span class="chip ${state.stageState === "blocked" ? "err" : state.stageState === "done" ? "ok" : "warn"}">${esc(state.stageKey)} · ${esc(state.stageState)}</span>`
+        : `<span class="chip">尚未启动</span>`;
     const nextButton = next.kind === "terminal" ? "" :
       `<button type="button" class="action" id="workflowNextAction" data-next-kind="${esc(next.kind)}" data-next-target="${esc(next.target || "")}" data-next-tab="${esc(next.tab || "")}">${esc(next.label)}</button>`;
     node.innerHTML = `
@@ -252,8 +285,7 @@
   function renderJourney() {
     const pipeline = $("pipeline");
     if (!pipeline) return;
-    const state = snapshot();
-    const steps = stepStates(state);
+    const steps = stepStates(snapshot());
     pipeline.innerHTML = steps.map(([key, label, status], index) => {
       const badge = status === "done" ? "✓" : status === "running" ? "▶" : status === "blocked" ? "✕" : status === "not-applicable" ? "—" : "";
       const current = ["ready", "running", "blocked"].includes(status) ? ' aria-current="step"' : "";
@@ -288,7 +320,8 @@
   function switchWorkflowTab(tab) {
     if (!tab || tab === activeTab) return;
     if (!guardReviewNavigation()) return;
-    const button = $("tabs")?.querySelector(`[data-tab="${CSS.escape(tab)}"]`);
+    const safeTab = String(tab).replace(/[^a-z_-]/gi, "");
+    const button = $("tabs")?.querySelector(`[data-tab="${safeTab}"]`);
     if (button) {
       button.click();
       $("detailPanel")?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -352,8 +385,7 @@
     list.querySelectorAll(".run").forEach((run) => {
       run.setAttribute("role", "option");
       run.tabIndex = run.dataset.run === selectedRun ? 0 : -1;
-      const existing = run.querySelector(".stage-line");
-      if (!existing) {
+      if (!run.querySelector(".stage-line")) {
         const meta = document.createElement("div");
         meta.className = "stage-line";
         const summary = runs.find((item) => item.run_id === run.dataset.run);
@@ -363,6 +395,39 @@
           : `<span class="muted">暂无阶段证据</span>`;
         run.appendChild(meta);
       }
+    });
+  }
+
+  function syncAutoRefresh() {
+    const checkbox = $("autoRefresh");
+    const label = checkbox?.closest("label");
+    if (!checkbox || !label) return;
+    let status = $("autoRefreshState");
+    if (!status) {
+      for (const node of [...label.childNodes]) {
+        if (node.nodeType === Node.TEXT_NODE && node.nodeValue.trim()) node.nodeValue = " ";
+      }
+      status = document.createElement("span");
+      status.id = "autoRefreshState";
+      label.appendChild(status);
+    }
+    status.textContent = checkbox.checked ? "自动刷新 5s" : "自动刷新已暂停";
+    label.classList.toggle("warn", !checkbox.checked);
+    label.title = checkbox.checked
+      ? "每 5 秒刷新运行状态；Review 输入不会被轮询重绘。"
+      : "自动刷新已暂停；表单和 Review 输入保持不变。";
+  }
+
+  function applyControlScopes() {
+    for (const [id, scope] of Object.entries(CONTROL_SCOPE)) {
+      const button = $(id);
+      if (!button) continue;
+      button.dataset.uxScope = scope;
+      button.setAttribute("aria-description", `影响对象：${scope}`);
+    }
+    document.querySelectorAll("[data-unify]").forEach((button) => {
+      button.dataset.uxScope = "当前同源多译组的全部 TM 坐标";
+      button.setAttribute("aria-description", `影响对象：${button.dataset.uxScope}`);
     });
   }
 
@@ -394,6 +459,7 @@
     if (stale && currentPreflight?.stale_formal?.count) {
       stale.textContent = `备份 TM 并退休 ${currentPreflight.stale_formal.count} 条过期记录`;
     }
+    applyControlScopes();
   }
 
   function decorateDynamicActions() {
@@ -411,11 +477,16 @@
     $("groupDefer")?.classList.add("tertiary-action");
     if ($("clusterExclude")) $("clusterExclude").textContent = "按路径排除术语规则";
 
-    const publish = $("publishRelease");
-    if (publish?.disabled) {
-      publish.title = detail?.artifact?.quality_gate_passed === false
-        ? "QualityGate 未通过，不能发布。" : "正式制品不存在，不能发布。";
+    const publish = $("publishRelease"), message = $("publishMessage");
+    if (publish?.disabled && message) {
+      const reason = detail?.artifact?.quality_gate_passed === false
+        ? "QualityGate 未通过，不能发布。"
+        : "正式制品不存在，不能发布。";
+      publish.title = reason;
+      message.className = "chip warn";
+      message.textContent = reason;
     }
+    applyControlScopes();
   }
 
   function refreshUx() {
@@ -425,6 +496,7 @@
     decorateRuns();
     syncPrepareControls();
     decorateDynamicActions();
+    syncAutoRefresh();
   }
 
   function installNavigationGuards() {
@@ -438,6 +510,13 @@
     $("runlist")?.addEventListener("click", (event) => {
       const run = event.target.closest(".run[data-run]");
       if (!run || run.dataset.run === selectedRun) return;
+      if (!guardReviewNavigation()) {
+        event.preventDefault(); event.stopImmediatePropagation();
+      }
+    }, true);
+    $("reviewQueue")?.addEventListener("click", (event) => {
+      const row = event.target.closest(".qitem[data-idx]");
+      if (!row || Number(row.dataset.idx) === review.selected) return;
       if (!guardReviewNavigation()) {
         event.preventDefault(); event.stopImmediatePropagation();
       }
@@ -484,6 +563,14 @@
     });
   }
 
+  function releaseBusyControl(button) {
+    if (!button?.isConnected) return;
+    button.dataset.uxBusy = "false";
+    button.removeAttribute("aria-busy");
+    button.removeAttribute("data-ux-request-started");
+    busyControls.delete(button);
+  }
+
   function installMutationContract() {
     document.addEventListener("click", (event) => {
       const button = event.target.closest(MUTATION_SELECTOR);
@@ -501,20 +588,19 @@
       button.dataset.uxBusy = "true";
       button.setAttribute("aria-busy", "true");
       busyControls.add(button);
+      setTimeout(() => {
+        if (button.dataset.uxRequestStarted !== "true") releaseBusyControl(button);
+      }, 0);
     }, true);
 
     const legacyPostApi = postApi;
     postApi = async function(path, payload) {
+      for (const button of busyControls) button.dataset.uxRequestStarted = "true";
       try {
         return await legacyPostApi(path, payload);
       } finally {
         setTimeout(() => {
-          for (const button of busyControls) {
-            if (!button.isConnected) continue;
-            button.dataset.uxBusy = "false";
-            button.removeAttribute("aria-busy");
-          }
-          busyControls.clear();
+          for (const button of [...busyControls]) releaseBusyControl(button);
           refreshUx();
         }, 0);
       }
@@ -566,6 +652,7 @@
   installReviewDirtyTracking();
   installMutationContract();
   wrapLegacyRenderers();
+  $("autoRefresh")?.addEventListener("change", syncAutoRefresh);
   refreshUx();
 
   document.addEventListener("localizer:locale-changed", () => setTimeout(refreshUx, 0));
