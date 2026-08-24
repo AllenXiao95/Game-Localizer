@@ -6,10 +6,17 @@ build-backend = "setuptools.build_meta"
 name = "game-localizer"
 version = "0.1.0"
 description = "Game localization preprocessing, translation, QA, and publishing framework"
+readme = "README.en.md"
 license = { file = "LICENSE" }
 classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
   "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Topic :: Software Development :: Internationalization",
 ]
+keywords = ["game-localization", "localization", "l10n", "translation-memory", "gettext"]
 requires-python = ">=3.10"
 dependencies = [
   "click>=8,<9",
@@ -18,6 +25,13 @@ dependencies = [
   "PyYAML>=6",
   "typer>=0.9",
 ]
+
+[project.urls]
+Homepage = "https://allenxiao95.github.io/Game-Localizer/en/"
+Documentation = "https://allenxiao95.github.io/Game-Localizer/en/"
+Repository = "https://github.com/AllenXiao95/Game-Localizer"
+Issues = "https://github.com/AllenXiao95/Game-Localizer/issues"
+Changelog = "https://github.com/AllenXiao95/Game-Localizer/blob/master/CHANGELOG.md"
 
 [project.scripts]
 localizer = "localizer.cli.main:main"
