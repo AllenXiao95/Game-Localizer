@@ -5,7 +5,6 @@ import json
 import shutil
 import subprocess
 import unittest
-from pathlib import Path
 
 from localizer.web.dashboard_server import (
     _I18N_MARKER,
@@ -16,6 +15,7 @@ from localizer.web.server import STATIC_ROOT
 
 
 WORKFLOW = STATIC_ROOT / "workflow-ux.js"
+PUBLISH_WORKFLOW = STATIC_ROOT / "workflow-publish-ux.js"
 WORKFLOW_I18N = STATIC_ROOT / "workflow-i18n.json"
 INDEX = STATIC_ROOT / "index.html"
 
@@ -29,6 +29,11 @@ class WorkflowInjectionTests(unittest.TestCase):
         self.assertGreater(rendered.index(_WORKFLOW_MARKER), rendered.index("setInterval("))
         self.assertLess(rendered.index(_WORKFLOW_MARKER), rendered.index("</body>"))
         self.assertIn("window.LocalizerWorkflowUX", rendered)
+        self.assertIn("window.LocalizerWorkflowPublishUX", rendered)
+        self.assertLess(
+            rendered.index("window.LocalizerWorkflowUX"),
+            rendered.index("window.LocalizerWorkflowPublishUX"),
+        )
 
     def test_dashboard_extension_injection_is_idempotent(self) -> None:
         source = INDEX.read_text(encoding="utf-8")
@@ -44,11 +49,14 @@ class WorkflowInjectionTests(unittest.TestCase):
         payload = json.loads(WORKFLOW_I18N.read_text(encoding="utf-8"))
         pairs = {source: target for source, target in payload["phrases"]}
 
+        self.assertEqual("Workflow", pairs["工作流"])
         self.assertEqual("Prepare", pairs["准备"])
         self.assertEqual("Publish", pairs["发布"])
         self.assertEqual("Recommended next step", pairs["推荐下一步"])
         self.assertEqual("Run preflight", pairs["运行预检"])
         self.assertIn("Publish", pairs["发布到已配置目标"])
+        self.assertEqual("Preflight found", pairs["预检发现"])
+        self.assertIn("stale entries", pairs["条过期记录"])
 
 
 class WorkflowStateMachineTests(unittest.TestCase):
@@ -267,6 +275,73 @@ class WorkflowInteractionContractTests(unittest.TestCase):
     def test_auto_refresh_has_an_explicit_paused_state(self) -> None:
         self.assertIn("自动刷新已暂停", self.source)
         self.assertIn('addEventListener("change", syncAutoRefresh)', self.source)
+
+
+class PublishReceiptUXTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.source = PUBLISH_WORKFLOW.read_text(encoding="utf-8")
+        cls.node = shutil.which("node")
+
+    def test_publish_extension_is_valid_javascript(self) -> None:
+        if not self.node:
+            self.skipTest("需要 node --check 才能校验 workflow-publish-ux.js")
+        result = subprocess.run(
+            [self.node, "--check", str(PUBLISH_WORKFLOW)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_target_receipt_distinguishes_uploaded_skipped_and_failure_reason(self) -> None:
+        if not self.node:
+            self.skipTest("需要 node 才能执行 publish receipt renderer")
+        start = self.source.index("function targetResult(")
+        end = self.source.index("\n  function receiptPanel()", start)
+        helper = self.source[start:end]
+        target = {
+            "target": "r2",
+            "status": "failed",
+            "objects": [
+                {"skipped": False},
+                {"skipped": False},
+                {"skipped": True},
+            ],
+            "error_message": "credential rejected",
+        }
+        script = (
+            "const esc = (x) => String(x); const num = (x) => String(x);"
+            " const publishSummary = (x) => `${x.target}:${x.status}`;\n"
+            + helper
+            + "\nconsole.log(targetResult("
+            + json.dumps(target)
+            + "));"
+        )
+        result = subprocess.run(
+            [self.node, "-e", script],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("上传 2", result.stdout)
+        self.assertIn("跳过 1", result.stdout)
+        self.assertIn("credential rejected", result.stdout)
+
+    def test_terminal_success_and_failure_have_explicit_follow_up_controls(self) -> None:
+        self.assertIn("publish-result", self.source.lower() if "publish-result" in self.source.lower() else "publish-result")
+        self.assertIn("重新发布（幂等）", self.source)
+        self.assertIn("重试发布到已配置目标", self.source)
+        self.assertIn("主工作流已完成", self.source)
+        self.assertIn("上次发布未完全成功", self.source)
+        self.assertIn("receipt.source", self.source)
+        self.assertIn("receipt.targets", self.source)
+
+    def test_active_publish_for_selected_run_disables_duplicate_submit(self) -> None:
+        self.assertIn('item.kind === "publish" && item.run_id === selectedRun', self.source)
+        self.assertIn('button.disabled = true', self.source)
+        self.assertIn("禁止重复提交", self.source)
 
 
 if __name__ == "__main__":
