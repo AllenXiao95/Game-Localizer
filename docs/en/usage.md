@@ -81,7 +81,7 @@ Local copy only:
 localizer publish-local path/to/artifact-manifest.json path/to/destination
 ```
 
-Remote publishing additionally requires the relevant optional dependency, environment credentials, and the rotation/audit declarations in `security`. It is fail-closed by default.
+Remote publishing additionally requires the relevant optional dependency and environment credentials. A missing rotation record is not treated as evidence of a leak. Set `security.credential_rotation_required: true` only for a known leak, accidental credential commit, or mandatory rotation; remote targets then remain fail-closed until both `credential_rotation_completed_at` and `rotation_record` are present. The artifact view shows this state before publishing and reports the reason for every failed target afterward.
 
 ## Resource variants
 

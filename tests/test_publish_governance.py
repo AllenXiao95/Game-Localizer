@@ -1,17 +1,18 @@
-"""远端发布的凭据治理必须由代码强制执行。
+"""远端发布的凭据事件治理必须由代码强制执行。
 
-测试覆盖 Section 语义、工厂函数和编排器的单目标隔离，确保未完成治理声明时
-远端凭据不会进入网络请求路径。
+测试覆盖默认不预设泄露、显式事件的 fail-closed 语义，以及单目标隔离。
 """
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sys
 import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -56,12 +57,17 @@ def _remote_target(target_type: str) -> PublishTargetSection:
 
 
 class SecuritySectionTests(unittest.TestCase):
-    def test_default_is_fail_closed(self) -> None:
-        self.assertFalse(SecuritySection().remote_publishing_allowed)
+    def test_default_does_not_assume_a_credential_incident(self) -> None:
+        section = SecuritySection()
+        self.assertTrue(section.remote_publishing_allowed)
+        section.assert_remote_publishing_allowed("github_release")
 
-    def test_date_alone_is_not_enough(self) -> None:
+    def test_declared_rotation_event_stays_closed_without_a_record(self) -> None:
         # 只填日期不留记录，事后无法核对到底轮换了哪几套 —— 那不算治理完成。
-        section = SecuritySection(credential_rotation_completed_at="2026-08-01")
+        section = SecuritySection(
+            credential_rotation_required=True,
+            credential_rotation_completed_at="2026-08-01",
+        )
         self.assertFalse(section.remote_publishing_allowed)
         with self.assertRaises(GovernanceError) as ctx:
             section.assert_remote_publishing_allowed("github_release")
@@ -69,6 +75,7 @@ class SecuritySectionTests(unittest.TestCase):
 
     def test_both_fields_open_the_gate(self) -> None:
         section = SecuritySection(
+            credential_rotation_required=True,
             credential_rotation_completed_at="2026-08-01",
             rotation_record="docs/security/rotation-2026-08.md",
         )
@@ -90,14 +97,15 @@ class FactoryGateTests(unittest.TestCase):
             with self.subTest(target=target_type):
                 with self.assertRaises(GovernanceError):
                     publisher_from_config(
-                        _remote_target(target_type), security=SecuritySection()
+                        _remote_target(target_type),
+                        security=SecuritySection(credential_rotation_required=True),
                     )
 
     def test_local_target_is_never_gated(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             publisher_from_config(
                 PublishTargetSection(type="local", destination=Path(temp)),
-                security=SecuritySection(),
+                security=SecuritySection(credential_rotation_required=True),
             )
 
 
@@ -136,7 +144,9 @@ class OrchestratorIsolationTests(unittest.TestCase):
                     *[_remote_target(t) for t in REMOTE_TYPES],
                 ]
             )
-            results = PublishOrchestrator().publish(bundle, section)
+            results = PublishOrchestrator(
+                security=SecuritySection(credential_rotation_required=True)
+            ).publish(bundle, section)
         by_target = {r.target: r for r in results}
         self.assertEqual("succeeded", by_target["local"].status)
         for target_type in REMOTE_TYPES:
@@ -147,25 +157,27 @@ class OrchestratorIsolationTests(unittest.TestCase):
             # 重试一万次也不会变的东西。
             self.assertFalse(result.retryable)
 
-    def test_forgetting_to_pass_security_blocks_rather_than_opens(self) -> None:
-        # 默认工厂必须 fail-closed —— 忘记传 security 的结果是「远端发不出去」，
-        # 不是「远端畅通无阻」。
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            results = PublishOrchestrator().publish(
-                self._bundle(root),
-                PublishSection(targets=[_remote_target("github_release")]),
-            )
-        self.assertEqual("governance", results[0].error_class)
+    def test_default_reaches_provider_credential_validation(self) -> None:
+        # 没有声明凭据事件时不应伪装成治理拦截；Provider 仍会独立检查凭据。
+        with patch.dict(os.environ, {}, clear=True):
+            with tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                results = PublishOrchestrator().publish(
+                    self._bundle(root),
+                    PublishSection(targets=[_remote_target("github_release")]),
+                )
+        self.assertEqual("ValueError", results[0].error_class)
+        self.assertIn("environment variable is unset", results[0].error_message)
 
 
 class ShippedConfigDeclaresGovernanceTests(unittest.TestCase):
-    def test_example_config_keeps_remote_publish_disabled(self) -> None:
-        """通用示例只启用本地发布，并保持远端发布治理闸门关闭。"""
+    def test_example_config_does_not_declare_a_credential_incident(self) -> None:
+        """通用示例只启用本地发布，也不会凭空声明凭据已经泄露。"""
         import yaml
 
         path = ROOT / "projects" / "example" / "project.yaml"
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+        self.assertFalse(raw["security"]["credential_rotation_required"])
         self.assertIsNone(raw["security"]["credential_rotation_completed_at"])
         self.assertEqual(["local"], [target["type"] for target in raw["publish"]["targets"]])
 

@@ -126,7 +126,9 @@ build:
   encryption: none
 
 security:
-  # 远端发布默认 fail-closed；本地发布不需要填写这两项。
+  # 默认不假定凭据已经泄露。只有确认发生泄露、误提交或强制轮换事件时才改为 true；
+  # 此时远端发布会保持 fail-closed，直到日期和审计记录都已填写。
+  credential_rotation_required: false
   credential_rotation_completed_at: null
   rotation_record: null
 

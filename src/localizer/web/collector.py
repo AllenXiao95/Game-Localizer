@@ -187,6 +187,7 @@ class DashboardCollector:
                 {"type": target.type, "destination": str(target.destination or "")}
                 for target in self.config.publish.targets
             ],
+            "publish_security": self._publish_security(),
             "pipeline": [
                 {"key": key, "label": label, "detail": detail, "milestone": ms}
                 for key, label, detail, ms in PIPELINE
@@ -206,6 +207,40 @@ class DashboardCollector:
             {"name": name, "active": name == active, **self._path_status(path)}
             for name, path in sorted(self.config.paths.variants.items())
         ]
+
+    def _publish_security(self) -> Dict[str, Any]:
+        remote_targets = [
+            target.type for target in self.config.publish.targets
+            if target.type != "local"
+        ]
+        security = self.config.security
+        if not remote_targets:
+            state = "not_configured"
+            message = "未配置远端发布目标；当前只会生成或复制本地制品。"
+        elif not security.remote_publishing_allowed:
+            state = "blocked"
+            message = (
+                "已显式声明凭据需要轮换，但轮换日期或审计记录尚不完整；"
+                "本地目标仍会执行，远端目标会被治理闸门拒绝。"
+            )
+        elif security.credential_rotation_required:
+            state = "ready"
+            message = "凭据轮换要求及审计记录已完成，远端发布治理检查通过。"
+        else:
+            state = "ready"
+            message = (
+                "未声明凭据泄露或强制轮换事件，不启用轮换拦截；"
+                "发布时仍会校验环境凭据、Provider 权限及上传结果。"
+            )
+        return {
+            "state": state,
+            "message": message,
+            "remote_targets": remote_targets,
+            "credential_rotation_required": security.credential_rotation_required,
+            "credential_rotation_completed": bool(
+                security.credential_rotation_completed_at and security.rotation_record
+            ),
+        }
 
     def _path_status(self, path: Optional[Path]) -> Dict[str, Any]:
         # 只配 `paths.sources` 的多目录项目里 `paths.source` 是 None。正常路径上

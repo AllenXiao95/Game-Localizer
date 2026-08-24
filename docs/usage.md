@@ -108,7 +108,7 @@ localizer publish projects/my-project/project.yaml path/to/artifact-manifest.jso
 localizer publish-local path/to/artifact-manifest.json path/to/destination
 ```
 
-远端发布还需要相应可选依赖、环境变量凭据，以及 `security` 中的轮换时间和审计记录。该闸门默认关闭，防止把示例凭据或未经治理的长期密钥带入发布流程。
+远端发布需要相应可选依赖和环境变量凭据，但不会因为缺少轮换记录就推定凭据已经泄露。只有发生已知泄露、凭据误提交或强制轮换事件时，才设置 `security.credential_rotation_required: true`；此后远端发布保持 fail-closed，直到 `credential_rotation_completed_at` 和 `rotation_record` 都已填写。面板会在制品页、发布前展示当前状态，发布失败后也会显示每个目标的具体原因。
 
 ## 多资源变体
 

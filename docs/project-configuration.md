@@ -279,7 +279,7 @@ build:
 
 ### `security`
 
-`credential_rotation_completed_at` 和 `rotation_record` 是远端发布治理声明。只要 publish 中存在远端目标，两者都必须填写；本地发布不需要。不要为了通过校验而填写虚假值。
+`credential_rotation_required` 默认是 `false`，表示没有声明凭据泄露或强制轮换事件，不会仅因轮换记录为空而拦截远端发布。确认发生泄露、误提交或强制轮换时将它设为 `true`；此后必须同时填写 `credential_rotation_completed_at` 和 `rotation_record` 才会重新放行远端目标。不要为了通过校验而填写虚假值。
 
 ### `publish.targets[]`
 

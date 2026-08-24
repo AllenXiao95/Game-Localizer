@@ -289,6 +289,20 @@ class DashboardShowsSkippedObjectsTests(unittest.TestCase):
         (line,) = self._run([{"target": "oss", "status": "failed", "objects": []}])
         self.assertEqual("oss:failed", line)
 
+    def test_a_failed_target_shows_the_actionable_reason(self) -> None:
+        (line,) = self._run(
+            [{
+                "target": "github_release",
+                "status": "failed",
+                "error_message": "credential environment variable is unset",
+                "objects": [],
+            }]
+        )
+        self.assertEqual(
+            "github_release:failed（credential environment variable is unset）",
+            line,
+        )
+
     def test_a_receipt_predating_the_field_counts_everything_as_uploaded(self) -> None:
         """更旧的回执有 objects 但没有 skipped 字段。
 
