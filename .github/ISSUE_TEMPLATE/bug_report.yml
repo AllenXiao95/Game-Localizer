@@ -1,0 +1,70 @@
+name: Bug report
+description: Report a reproducible defect in Game Localizer
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Please remove secrets, private localization data, and copyrighted game assets before submitting.
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: Tagged version or commit SHA where the problem occurs.
+      placeholder: v0.1.0 or abc1234
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Operating system and Python version.
+      placeholder: Windows 11, Python 3.10.14
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Resource scanning / parsing
+        - Translation memory
+        - Model-assisted translation
+        - QA / QualityGate
+        - Human review / dashboard
+        - Artifact build
+        - Publishing
+        - Documentation / packaging
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Give the smallest sequence that reproduces the issue. Use synthetic or redistributable input when possible.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and logs
+      description: Include relevant logs after removing secrets and private data.
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checks
+      options:
+        - label: I searched existing issues and pull requests for the same problem.
+          required: true
+        - label: I removed credentials, private localization content, and non-redistributable game assets.
+          required: true

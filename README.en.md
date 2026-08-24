@@ -8,7 +8,18 @@
 
 Game Localizer is a localization pipeline for game text, not merely a machine-translation tool. It brings resource scanning, translation memory, model-assisted translation, quality assurance, human revision, artifact building, and publishing together in one traceable workflow.
 
-The project grew out of several years of maintaining Chinese localization for *Mir Tankov* and generalizes practices validated through real game updates into a reusable framework. Localization resources and release metadata are maintained in [`tanki-i18n-metadata`](https://github.com/AllenXiao95/tanki-i18n-metadata).
+The project was open-sourced in August 2026, but the workflow itself grew out of several years of maintaining Chinese localization for *Mir Tankov*. Practices validated through recurring real game updates were generalized into this reusable framework. Localization resources and release metadata are maintained separately in [`tanki-i18n-metadata`](https://github.com/AllenXiao95/tanki-i18n-metadata), keeping redistributable framework code distinct from game-specific content and release data.
+
+## Project status
+
+Game Localizer is an actively developed pre-1.0 open-source project. The current repository already includes cross-platform CI, automated regression coverage, full-history secret scanning, bilingual documentation, an example project, and explicit QualityGate / human-authorization boundaries around release and publishing workflows.
+
+The next major design track is [M8 Agentic Workflows and the Tauri Client](docs/en/milestone-m8-agent-client.md). It is intentionally documented as a proposal before implementation so agent permissions, deterministic validation, security boundaries, and human approval requirements remain reviewable.
+
+- [Contributing](CONTRIBUTING.md)
+- [Security policy](SECURITY.md)
+- [Changelog](CHANGELOG.md)
+- [Issue tracker](https://github.com/AllenXiao95/Game-Localizer/issues)
 
 ## Key features
 

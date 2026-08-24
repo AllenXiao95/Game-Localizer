@@ -1,0 +1,54 @@
+name: Feature request
+description: Propose a localization or maintainer workflow improvement
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or workflow gap
+      description: Describe the real localization or maintainer problem this would solve.
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe the user-visible result without prescribing implementation unless necessary.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Resource format / adapter
+        - Translation memory
+        - Model-assisted translation
+        - QA / QualityGate
+        - Review / dashboard
+        - Build / publishing
+        - Agentic workflow
+        - Packaging / documentation
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints and safety considerations
+      description: Note compatibility, release-governance, data-licensing, credential, or human-review requirements.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Optional. Existing workflow, workaround, or related tools.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checks
+      options:
+        - label: I searched existing issues and pull requests for related work.
+          required: true
+        - label: This request describes a real workflow need rather than only a preferred implementation.
+          required: true
