@@ -43,9 +43,6 @@ QA_CODE_LABELS = {
     "empty_translation": "译文为空",
 }
 
-
-# 有专属入口、且体积大到尾读没有意义的运行产物，不进「文件与日志」列表。
-# 面板的"本次产物"列表里不该出现的运行内部文件。
 _HIDDEN_RUN_FILES = {"qa-review-index.json", "owner.lock"}
 
 
@@ -54,20 +51,7 @@ def _utc_iso(timestamp: float) -> str:
 
 
 def _read_json(path: Path, *, attempts: int = 10, delay: float = 0.02) -> Optional[Any]:
-    """读 JSON，对「正在被原子替换」这种瞬时窗口做重试。
-
-    写侧用 AtomicIO 的 write → replace 落盘，替换的一瞬间目标路径短暂不可读。
-    实测 4 worker 并发写 + 面板轮询时，原 4 次/60 ms 窗口仍会偶发耗尽；
-    10 次的最坏等待为 180 ms，仍低于面板一次刷新 500 ms 的预算。面板每
-    5 秒刷新一次，撞上替换窗口就会整块闪成「暂无数据」，看起来像运行出了问题。
-    这类瞬时失败应在有界窗口内重试，
-    真正的缺失（文件不存在、内容损坏）在重试耗尽后仍返回 None。
-
-    读句柄必须走 `AtomicIO.read_text`（共享 DELETE）。普通 `open()` 会让
-    写侧的 `ReplaceFileW` 拿到 ERROR_SHARING_VIOLATION —— **面板这一侧的
-    读法直接决定翻译运行会不会被 checkpoint 落盘失败拖死**，这不是读侧的
-    性能问题而是写侧的可用性问题。
-    """
+    """读 JSON，对「正在被原子替换」这种瞬时窗口做重试。"""
     last_error: Optional[Exception] = None
     for attempt in range(attempts):
         try:
@@ -81,11 +65,6 @@ def _read_json(path: Path, *, attempts: int = 10, delay: float = 0.02) -> Option
 
 
 def _batch_size(batch: Any) -> int:
-    """批次词条数。
-
-    identities 只在 `planned` 事件上出现（写放大治理，见 batch_orchestrator）；
-    其余事件带 `size`。schema v1/v2 的旧 checkpoint 只有 identities，两者都读。
-    """
     size = batch.get("size")
     if isinstance(size, int):
         return size
@@ -123,8 +102,6 @@ class DashboardCollector:
         self.workspace = Path(config.paths.workspace)
         self.output = Path(config.paths.output)
 
-    # ---------------------------------------------------------------- overview
-
     def overview(self) -> Dict[str, Any]:
         return {
             "project": {
@@ -136,11 +113,8 @@ class DashboardCollector:
                 "workflow_mode": self.config.workflow.mode,
                 "release_channel": self.config.build.release_channel,
                 "release_variant": self.config.build.variant or "",
-                "release_env": (
-                    self.config.build.compatibility_metadata.env or ""
-                ),
+                "release_env": self.config.build.compatibility_metadata.env or "",
                 "config_path": str(self.config_path),
-                # API 每次请求只投影一个变体；页面下拉框可切换这个作用域。
                 "active_variant": self.config.active_variant,
                 "variants": self._variants(),
             },
@@ -153,7 +127,6 @@ class DashboardCollector:
                 "tokenizers": self._path_status(self.config.cache.tokenizers),
             },
             "provider": {
-                # 只显示环境变量名与该变量是否已设置，绝不读取或回显其值。
                 "type": self.config.provider.type,
                 "model": self.config.provider.model,
                 "base_url": self.config.provider.base_url,
@@ -161,9 +134,7 @@ class DashboardCollector:
                 "concurrency": self.config.provider.concurrency,
                 "max_output_tokens": self.config.provider.max_output_tokens,
                 "context_window": self.config.provider.context_window,
-                "custom_parameter_keys": sorted(
-                    self.config.provider.custom_parameters
-                ),
+                "custom_parameter_keys": sorted(self.config.provider.custom_parameters),
                 "tokenizer": (
                     {
                         "type": self.config.provider.tokenizer.type,
@@ -179,9 +150,7 @@ class DashboardCollector:
             "environment": {
                 "auto_discover": self.config.environment.auto_discover,
                 "override_existing": self.config.environment.override_existing,
-                "dotenv_files": [
-                    str(path) for path in self.config.environment.dotenv_files
-                ],
+                "dotenv_files": [str(path) for path in self.config.environment.dotenv_files],
             },
             "publish_targets": [
                 {"type": target.type, "destination": str(target.destination or "")}
@@ -197,11 +166,6 @@ class DashboardCollector:
         }
 
     def _variants(self) -> List[Dict[str, Any]]:
-        """项目声明的全部资源目录变体。单目录项目返回空列表。
-
-        注意 `self.config` 已经是**投影后**的配置（`for_variant`），它的
-        `paths.sources` 原样保留，所以这里仍然看得到兄弟变体。
-        """
         active = self.config.active_variant
         return [
             {"name": name, "active": name == active, **self._path_status(path)}
@@ -210,8 +174,7 @@ class DashboardCollector:
 
     def _publish_security(self) -> Dict[str, Any]:
         remote_targets = [
-            target.type for target in self.config.publish.targets
-            if target.type != "local"
+            target.type for target in self.config.publish.targets if target.type != "local"
         ]
         security = self.config.security
         if not remote_targets:
@@ -243,9 +206,6 @@ class DashboardCollector:
         }
 
     def _path_status(self, path: Optional[Path]) -> Dict[str, Any]:
-        # 只配 `paths.sources` 的多目录项目里 `paths.source` 是 None。正常路径上
-        # `build_collector` 已经用 `for_variant()` 投影过，这里不该再拿到 None；
-        # 但面板是纯只读的观测面，任何一个字段缺失都不该让整个 overview 崩掉。
         if path is None:
             return {"path": "", "exists": False, "configured": False}
         resolved = Path(path)
@@ -254,8 +214,6 @@ class DashboardCollector:
         except OSError:
             exists = False
         return {"path": str(resolved), "exists": exists, "configured": True}
-
-    # --------------------------------------------------------------------- tm
 
     def tm_summary(self) -> Dict[str, Any]:
         database = Path(self.config.tm.database)
@@ -271,9 +229,7 @@ class DashboardCollector:
                 row["key"]: row["value"]
                 for row in connection.execute("SELECT key, value FROM metadata")
             }
-            total = connection.execute(
-                "SELECT COUNT(*) AS n FROM tm_entries"
-            ).fetchone()["n"]
+            total = connection.execute("SELECT COUNT(*) AS n FROM tm_entries").fetchone()["n"]
 
             def group(column: str) -> Dict[str, int]:
                 rows = connection.execute(
@@ -291,7 +247,6 @@ class DashboardCollector:
             return {
                 "available": True,
                 "database": str(database),
-                # authoritative 缺省即 false —— 与 §12.5「SQLite 初始化后不是权威源」一致。
                 "authoritative": str(metadata.get("authoritative", "false")).lower() == "true",
                 "schema_version": metadata.get("schema_version"),
                 "total": total,
@@ -310,20 +265,20 @@ class DashboardCollector:
             connection.close()
 
     def legacy_baseline(self) -> Dict[str, Any]:
-        """M0 留下的存量分类基线，作为迁移前后的对照。"""
         stats = self.repo_root / "audit/baseline/tm_classification_stats.json"
         payload = _read_json(stats)
         if payload is None:
             return _missing(f"未找到分类基线：{stats}")
         return {"available": True, "source": str(stats), **payload}
 
-    # ------------------------------------------------------------------- runs
-
     def list_runs(self) -> List[Dict[str, Any]]:
         refs: Dict[str, Dict[str, Optional[Path]]] = {}
 
         def note(run_id: str, key: str, path: Path) -> None:
-            refs.setdefault(run_id, {"workspace_dir": None, "preview_dir": None, "release_dir": None})
+            refs.setdefault(
+                run_id,
+                {"workspace_dir": None, "preview_dir": None, "release_dir": None},
+            )
             refs[run_id][key] = path
 
         runs_root = self.workspace / "runs"
@@ -340,7 +295,9 @@ class DashboardCollector:
 
         summaries = []
         for run_id, paths in refs.items():
-            ref = RunRef(run_id, paths["workspace_dir"], paths["preview_dir"], paths["release_dir"])
+            ref = RunRef(
+                run_id, paths["workspace_dir"], paths["preview_dir"], paths["release_dir"]
+            )
             summaries.append(self._run_summary(ref))
         summaries.sort(key=lambda item: item["updated_at"] or "", reverse=True)
         return summaries
@@ -365,6 +322,7 @@ class DashboardCollector:
         progress = self._progress(ref)
         qa = self._qa_summary(ref)
         artifact = self._artifact(ref)
+        publish = self._publish_summary(ref)
         task = self._task_summary(ref)
         timestamps = [
             _utc_iso(path.stat().st_mtime)
@@ -375,10 +333,11 @@ class DashboardCollector:
             "run_id": ref.run_id,
             "modes": ref.modes,
             "updated_at": max(timestamps) if timestamps else None,
-            "stage": self._current_stage(ref, progress, qa, artifact),
+            "stage": self._current_stage(ref, progress, qa, artifact, publish),
             "progress": progress,
             "qa": qa,
             "artifact": artifact,
+            "publish": publish,
             "task": task,
         }
 
@@ -408,6 +367,33 @@ class DashboardCollector:
             ),
         }
 
+    @staticmethod
+    def _publish_summary(ref: RunRef) -> Dict[str, Any]:
+        """读取 run 级发布终态，让流水线刷新/重启后仍能恢复到 Publish。"""
+        if ref.workspace_dir is None:
+            return _missing("尚无发布记录")
+        path = ref.workspace_dir / "publish-result.json"
+        if not path.is_file():
+            return _missing("尚无 publish-result.json")
+        payload = _read_json(path)
+        if not isinstance(payload, dict):
+            return _missing(f"publish-result.json 无法解析：{path}")
+        result = payload.get("result")
+        result = result if isinstance(result, dict) else {}
+        error = payload.get("error")
+        return {
+            "available": True,
+            "source": str(path),
+            "task_id": payload.get("task_id"),
+            "status": str(payload.get("status") or "unknown"),
+            "passed": result.get("passed") if "passed" in result else None,
+            "targets": result.get("targets") if isinstance(result.get("targets"), list) else [],
+            "manifest": result.get("manifest") or payload.get("manifest"),
+            "error": error if isinstance(error, dict) else None,
+            "started_at": payload.get("started_at"),
+            "finished_at": payload.get("finished_at"),
+        }
+
     def run_detail(self, run_id: str) -> Optional[Dict[str, Any]]:
         ref = self._resolve_run(run_id)
         if ref is None:
@@ -423,8 +409,6 @@ class DashboardCollector:
         detail["files"] = self._run_files(ref)
         return detail
 
-    # --------------------------------------------------------------- progress
-
     def _checkpoint(self, ref: RunRef) -> Optional[Any]:
         if ref.workspace_dir is None:
             return None
@@ -435,9 +419,7 @@ class DashboardCollector:
         if not isinstance(payload, dict):
             return _missing("本次运行没有 checkpoint.json（可能全部命中 TM，未调用模型）")
         units = payload.get("units") or {}
-        states = Counter(
-            str((item or {}).get("state", "unknown")) for item in units.values()
-        )
+        states = Counter(str((item or {}).get("state", "unknown")) for item in units.values())
         total = sum(states.values())
         done = states.get("succeeded", 0)
         return {
@@ -459,7 +441,6 @@ class DashboardCollector:
         for index, batch in enumerate(batches):
             if not isinstance(batch, dict):
                 continue
-            # schema v1 没有 batch_id；保持“一行就是一个批次”的兼容解释。
             batch_id = str(batch.get("batch_id") or f"legacy-{index}")
             row = grouped.setdefault(
                 batch_id,
@@ -560,24 +541,16 @@ class DashboardCollector:
             "output_tokens": int(metrics.get("output_tokens") or 0),
             "total_tokens": int(metrics.get("input_tokens") or 0)
             + int(metrics.get("output_tokens") or 0),
-            "translation_units_total": int(
-                metrics.get("translation_units_total") or 0
-            ),
-            "translation_files_total": int(
-                metrics.get("translation_files_total") or 0
-            ),
+            "translation_units_total": int(metrics.get("translation_units_total") or 0),
+            "translation_files_total": int(metrics.get("translation_files_total") or 0),
             "translation_files_completed": len(completed_files),
             "translation_files_running": resource_states.get("running", 0),
             "translation_files_queued": resource_states.get("queued", 0),
             "translation_files_failed": resource_states.get("failed", 0)
             + resource_states.get("completed_with_failures", 0),
             "files_by_state": dict(resource_states),
-            # checkpoint 落盘降级：现在不再终止运行，但**必须可见**。不可见的
-            # 降级等于「面板显示一切正常，恢复时却少了一批译文」。
             "checkpoint_degraded": bool(metrics.get("checkpoint_degraded")),
-            "checkpoint_flush_failures": int(
-                metrics.get("checkpoint_flush_failures") or 0
-            ),
+            "checkpoint_flush_failures": int(metrics.get("checkpoint_flush_failures") or 0),
             "checkpoint_last_error": str(metrics.get("checkpoint_last_error") or ""),
             "workers": [
                 {"worker_id": worker_id, **dict(value or {})}
@@ -586,10 +559,7 @@ class DashboardCollector:
             "files": resource_rows,
         }
 
-    # --------------------------------------------------------------------- qa
-
     def _qa_path(self, ref: RunRef) -> Optional[Path]:
-        # release 报告优先：它才是决定能否发布的那一份。
         for directory in (ref.release_dir, ref.preview_dir):
             if directory is None:
                 continue
@@ -649,8 +619,8 @@ class DashboardCollector:
                 continue
             if needle:
                 haystack = " ".join(
-                    str(issue.get(field, "")) for field in
-                    ("message", "relative_path", "stable_identity", "code")
+                    str(issue.get(field, ""))
+                    for field in ("message", "relative_path", "stable_identity", "code")
                 ).lower()
                 if needle not in haystack:
                     continue
@@ -663,14 +633,11 @@ class DashboardCollector:
                     "relative_path": issue.get("relative_path"),
                     "stable_identity": issue.get("stable_identity"),
                     "details": issue.get("details") or {},
-                    # 审查视图靠它区分「本次新译（零容忍）」与「存量债」。
                     "provenance": issue.get("provenance", "unknown"),
                 }
             )
         window = rows[offset : offset + max(1, min(limit, 1000))]
         return {"available": True, "total": len(rows), "offset": offset, "issues": window}
-
-    # --------------------------------------------------------------- artifact
 
     def _artifact(self, ref: RunRef) -> Dict[str, Any]:
         if ref.release_dir is None:
@@ -700,10 +667,7 @@ class DashboardCollector:
             },
         }
 
-    # ------------------------------------------------------------------- logs
-
     def _run_files(self, ref: RunRef) -> List[Dict[str, Any]]:
-        """列出本次运行可查看的文本产物。只收白名单后缀，避免把 zip/mo 也列进来。"""
         allowed = {".json", ".csv", ".txt", ".log", ".md", ".yaml", ".yml"}
         rows: List[Dict[str, Any]] = []
         for root in (ref.workspace_dir, ref.preview_dir, ref.release_dir):
@@ -712,9 +676,6 @@ class DashboardCollector:
             for path in sorted(root.rglob("*")):
                 if not path.is_file() or path.suffix.lower() not in allowed:
                     continue
-                # 审查索引真机可达数 MB，而 read_text_file 是**尾读** 256 KB ——
-                # 在这里列出来，点开只会得到一段没有开头、没有表头的 JSON 碎片。
-                # 它有自己的入口（审查视图），不该混在「文件与日志」里。
                 if path.name in _HIDDEN_RUN_FILES:
                     continue
                 try:
@@ -733,7 +694,6 @@ class DashboardCollector:
         return rows
 
     def read_text_file(self, raw_path: str, *, tail_bytes: int = 262144) -> Optional[Dict[str, Any]]:
-        """读取白名单根目录下的文本文件尾部。越界一律拒绝。"""
         try:
             target = Path(raw_path).resolve()
         except (OSError, ValueError):
@@ -747,7 +707,6 @@ class DashboardCollector:
             return None
         try:
             size = target.stat().st_size
-            # 同 _read_json：读句柄必须共享 DELETE，否则会阻塞写侧的原子替换。
             raw = AtomicIO.read_bytes(target, tail_bytes=tail_bytes)
         except OSError as exc:
             return {"path": str(target), "truncated": False, "text": f"<读取失败：{exc}>"}
@@ -766,16 +725,41 @@ class DashboardCollector:
             return False
         return True
 
-    # ------------------------------------------------------------------ stage
-
     def _current_stage(
         self,
         ref: RunRef,
         progress: Dict[str, Any],
         qa: Dict[str, Any],
         artifact: Dict[str, Any],
+        publish: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """由磁盘证据反推当前阶段。没有运行态数据库，所以这是证据推断而非权威状态。"""
+        """由磁盘证据反推当前阶段；发布终态以 run 级回执为准。"""
+        if publish.get("available"):
+            status = publish.get("status")
+            passed = publish.get("passed")
+            if status in {"queued", "running"}:
+                return {"key": "publish", "state": "running", "note": "发布任务正在执行"}
+            if status == "completed" and passed is True:
+                targets = publish.get("targets") or []
+                return {
+                    "key": "publish",
+                    "state": "done",
+                    "note": f"发布完成：{len(targets)} 个 target 已处理",
+                }
+            error = publish.get("error") or {}
+            if status == "failed":
+                note = str(error.get("message") or "发布任务执行失败")
+            elif status == "completed" and passed is False:
+                failed = sum(
+                    1
+                    for target in publish.get("targets") or []
+                    if str((target or {}).get("status"))
+                    not in {"ok", "succeeded", "success"}
+                )
+                note = f"发布未完全成功：{failed} 个 target 失败"
+            else:
+                note = f"发布状态异常：{status}"
+            return {"key": "publish", "state": "blocked", "note": note}
         if artifact.get("available"):
             return {"key": "build", "state": "done", "note": "已产出正式制品与 Manifest"}
         if qa.get("available"):
@@ -784,7 +768,7 @@ class DashboardCollector:
                     "key": "gate",
                     "state": "blocked",
                     "note": f"QualityGate 未通过：error={qa.get('error_count')} "
-                            f"failed_units={qa.get('failed_unit_count')}",
+                    f"failed_units={qa.get('failed_unit_count')}",
                 }
             return {"key": "gate", "state": "done", "note": "QualityGate 通过"}
         if progress.get("available"):
@@ -793,7 +777,7 @@ class DashboardCollector:
                     "key": "translate",
                     "state": "running",
                     "note": f"{progress.get('succeeded')}/{progress.get('total')} 成功，"
-                            f"{progress.get('failed')} 条待重试或已失败",
+                    f"{progress.get('failed')} 条待重试或已失败",
                 }
             return {"key": "translate", "state": "running", "note": "批次进行中"}
         if ref.workspace_dir is not None:
