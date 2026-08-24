@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/AllenXiao95/Game-Localizer/security/advisories/new
+    about: Report security-sensitive issues privately instead of opening a public issue.
