@@ -365,6 +365,7 @@ class DashboardCollector:
         progress = self._progress(ref)
         qa = self._qa_summary(ref)
         artifact = self._artifact(ref)
+        publish = self._publish_summary(ref)
         task = self._task_summary(ref)
         timestamps = [
             _utc_iso(path.stat().st_mtime)
@@ -375,10 +376,11 @@ class DashboardCollector:
             "run_id": ref.run_id,
             "modes": ref.modes,
             "updated_at": max(timestamps) if timestamps else None,
-            "stage": self._current_stage(ref, progress, qa, artifact),
+            "stage": self._current_stage(ref, progress, qa, artifact, publish),
             "progress": progress,
             "qa": qa,
             "artifact": artifact,
+            "publish": publish,
             "task": task,
         }
 
@@ -406,6 +408,37 @@ class DashboardCollector:
                 if isinstance(payload.get("confirmation"), dict)
                 else None
             ),
+        }
+
+    @staticmethod
+    def _publish_summary(ref: RunRef) -> Dict[str, Any]:
+        """读取 run 级发布终态，使流水线在 Dashboard 重启后仍能恢复到 Publish。
+
+        发布任务本身由 TaskService 执行，并在结束时原子写入 publish-result.json。
+        这里不从按钮点击或内存任务列表猜测终态；磁盘回执才是跨刷新/重启可恢复的证据。
+        """
+        if ref.workspace_dir is None:
+            return _missing("尚无发布记录")
+        path = ref.workspace_dir / "publish-result.json"
+        if not path.is_file():
+            return _missing("尚无 publish-result.json")
+        payload = _read_json(path)
+        if not isinstance(payload, dict):
+            return _missing(f"publish-result.json 无法解析：{path}")
+        result = payload.get("result")
+        result = result if isinstance(result, dict) else {}
+        error = payload.get("error")
+        return {
+            "available": True,
+            "source": str(path),
+            "task_id": payload.get("task_id"),
+            "status": str(payload.get("status") or "unknown"),
+            "passed": result.get("passed") if "passed" in result else None,
+            "targets": result.get("targets") if isinstance(result.get("targets"), list) else [],
+            "manifest": result.get("manifest") or payload.get("manifest"),
+            "error": error if isinstance(error, dict) else None,
+            "started_at": payload.get("started_at"),
+            "finished_at": payload.get("finished_at"),
         }
 
     def run_detail(self, run_id: str) -> Optional[Dict[str, Any]]:
@@ -774,8 +807,33 @@ class DashboardCollector:
         progress: Dict[str, Any],
         qa: Dict[str, Any],
         artifact: Dict[str, Any],
+        publish: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """由磁盘证据反推当前阶段。没有运行态数据库，所以这是证据推断而非权威状态。"""
+        """由磁盘证据反推当前阶段。发布终态以 run 级持久回执为准。"""
+        if publish.get("available"):
+            status = publish.get("status")
+            passed = publish.get("passed")
+            if status in {"queued", "running"}:
+                return {"key": "publish", "state": "running", "note": "发布任务正在执行"}
+            if status == "completed" and passed is True:
+                targets = publish.get("targets") or []
+                return {
+                    "key": "publish",
+                    "state": "done",
+                    "note": f"发布完成：{len(targets)} 个 target 已处理",
+                }
+            error = publish.get("error") or {}
+            if status == "failed":
+                note = str(error.get("message") or "发布任务执行失败")
+            elif status == "completed" and passed is False:
+                failed = sum(
+                    1 for target in publish.get("targets") or []
+                    if str((target or {}).get("status")) not in {"ok", "succeeded", "success"}
+                )
+                note = f"发布未完全成功：{failed} 个 target 失败"
+            else:
+                note = f"发布状态异常：{status}"
+            return {"key": "publish", "state": "blocked", "note": note}
         if artifact.get("available"):
             return {"key": "build", "state": "done", "note": "已产出正式制品与 Manifest"}
         if qa.get("available"):
