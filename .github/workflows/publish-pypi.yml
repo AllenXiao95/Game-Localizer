@@ -1,0 +1,159 @@
+name: Publish Python package to PyPI
+
+on:
+  # One-time bootstrap for the already-published GitHub v0.1.0 release.
+  # Remove this push trigger after the first successful PyPI upload.
+  push:
+    branches: [master]
+    paths:
+      - ".github/workflows/publish-pypi.yml"
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git tag/ref to publish"
+        required: true
+        default: "v0.1.0"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pypi-publish
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build and validate distribution
+    runs-on: ubuntu-latest
+    outputs:
+      publish-ref: ${{ steps.resolve-ref.outputs.ref }}
+      version: ${{ steps.verify-metadata.outputs.version }}
+    steps:
+      - name: Resolve source ref
+        id: resolve-ref
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          MANUAL_REF: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          case "$EVENT_NAME" in
+            release)
+              ref="$RELEASE_TAG"
+              ;;
+            workflow_dispatch)
+              ref="$MANUAL_REF"
+              ;;
+            push)
+              # Bootstrap only: publish the existing GitHub v0.1.0 tag.
+              ref="v0.1.0"
+              ;;
+            *)
+              echo "Unsupported event: $EVENT_NAME" >&2
+              exit 1
+              ;;
+          esac
+          if [[ ! "$ref" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Ref must be a version tag such as v0.1.0; got: $ref" >&2
+            exit 1
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+      - name: Check out release tag
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.resolve-ref.outputs.ref }}
+          fetch-depth: 0
+
+      - name: Set up Python for packaging
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Verify tag matches package metadata
+        id: verify-metadata
+        shell: bash
+        env:
+          PUBLISH_REF: ${{ steps.resolve-ref.outputs.ref }}
+        run: |
+          set -euo pipefail
+          expected="${PUBLISH_REF#v}"
+          python - "$expected" <<'PY'
+          import pathlib
+          import sys
+          import tomllib
+
+          expected = sys.argv[1]
+          data = tomllib.loads(pathlib.Path("pyproject.toml").read_text(encoding="utf-8"))
+          version = data["project"]["version"]
+          if version != expected:
+              raise SystemExit(f"Tag/package version mismatch: tag={expected}, pyproject={version}")
+          print(f"Verified package version {version}")
+          with pathlib.Path(__import__("os").environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as fh:
+              fh.write(f"version={version}\n")
+          PY
+
+      - name: Build and validate distributions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade build twine
+          python -m build
+          python -m twine check dist/*
+
+      - name: Smoke-test installed wheel
+        shell: bash
+        run: |
+          set -euo pipefail
+          wheel="$(find dist -maxdepth 1 -name '*.whl' -print -quit)"
+          if [[ -z "$wheel" ]]; then
+            echo "No wheel found in dist/" >&2
+            exit 1
+          fi
+          python -m venv .venv-pypi-smoke
+          source .venv-pypi-smoke/bin/activate
+          python -m pip install --upgrade pip
+          python -m pip install "$wheel"
+          python - <<'PY'
+          import localizer
+          from importlib.resources import files
+
+          static_dir = files("localizer.web").joinpath("static")
+          html_files = [entry for entry in static_dir.iterdir() if entry.name.endswith(".html")]
+          if not html_files:
+              raise SystemExit("Packaged wheel is missing localizer.web/static/*.html")
+          print(f"Imported localizer from {localizer.__file__}")
+          print(f"Found {len(html_files)} packaged dashboard HTML file(s)")
+          PY
+          localizer --help >/dev/null
+
+      - name: Upload distributions for isolated publish job
+        uses: actions/upload-artifact@v7
+        with:
+          name: python-package-distributions
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish distribution to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/game-localizer
+    permissions:
+      id-token: write
+    steps:
+      - name: Download validated distributions
+        uses: actions/download-artifact@v7
+        with:
+          name: python-package-distributions
+          path: dist/
+
+      - name: Publish package distributions to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
