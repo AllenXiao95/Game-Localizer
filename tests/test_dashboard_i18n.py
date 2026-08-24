@@ -1,6 +1,7 @@
 """Regression coverage for the dashboard Chinese/English locale layer."""
 from __future__ import annotations
 
+import json
 import unittest
 
 from localizer.web import DashboardServer
@@ -22,6 +23,29 @@ class DashboardI18nTests(unittest.TestCase):
         self.assertIn("localizer.dashboard.locale", rendered)
         self.assertIn("MutationObserver", rendered)
         self.assertIn("localeToggle", rendered)
+        # There must be only one browser-side state/observer engine. Long-form copy is merged into
+        # its catalog before execution instead of installing a competing observer.
+        self.assertEqual(1, rendered.count("const observer = new MutationObserver"))
+
+    def test_long_form_catalog_is_merged_into_the_runtime(self) -> None:
+        source = (STATIC_ROOT / "index.html").read_text(encoding="utf-8")
+        rendered = inject_dashboard_i18n(source)
+        catalog = json.loads(
+            (STATIC_ROOT / "i18n-additions.json").read_text(encoding="utf-8")
+        )
+
+        self.assertGreaterEqual(len(catalog["phrases"]), 70)
+        for chinese, english in [
+            catalog["phrases"][0],
+            ["阶段状态由磁盘产物反推，不是运行态权威状态。",
+             "Stage status is inferred from persisted artifacts and is not the runtime source of truth."],
+            ["本地重新校验不调用模型，也不产生费用。",
+             "Local revalidation does not call the model and incurs no model cost."],
+            ["目标版本默认继承父运行但可在本次重建中修改；源路径与 .env 仍从父运行快照继承。版本变化只影响制品、Manifest、tag 和上传目录，不会让已安全复用的词条重新调用 Provider。",
+             "The target version defaults to the parent run but may be changed for this rebuild. Source path and .env still inherit from the parent snapshot. A version change affects only the artifact, Manifest, tag, and upload path; safely reused units do not call the provider again."],
+        ]:
+            self.assertIn(chinese, rendered)
+            self.assertIn(english, rendered)
 
     def test_number_and_clock_formatting_follow_selected_locale(self) -> None:
         source = (STATIC_ROOT / "index.html").read_text(encoding="utf-8")
@@ -51,6 +75,7 @@ class DashboardI18nTests(unittest.TestCase):
         self.assertIn("processTextNode", script)
         self.assertIn("processAttributes", script)
         self.assertIn("translateTree(document, false)", script)
+        self.assertIn("#localeToggle,script,style,pre,code,textarea,.mono,[data-i18n-raw]", script)
         self.assertNotIn("location.reload", script)
         self.assertNotIn("window.location =", script)
         self.assertNotIn("innerHTML = document", script)
