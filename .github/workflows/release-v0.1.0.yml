@@ -1,0 +1,71 @@
+name: release-v0.1.0
+
+on:
+  workflow_run:
+    workflows: ["framework-tests"]
+    types: [completed]
+    branches: [master]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    if: >-
+      ${{ github.event.workflow_run.conclusion == 'success' &&
+          github.event.workflow_run.event == 'push' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out validated master commit
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.10"
+
+      - name: Verify release metadata
+        shell: bash
+        run: |
+          python - <<'PY'
+          import pathlib
+          import tomllib
+
+          pyproject = tomllib.loads(pathlib.Path("pyproject.toml").read_text(encoding="utf-8"))
+          version = pyproject["project"]["version"]
+          if version != "0.1.0":
+              raise SystemExit(f"Expected project version 0.1.0, got {version}")
+
+          changelog = pathlib.Path("CHANGELOG.md").read_text(encoding="utf-8")
+          if "## [0.1.0] - 2026-08-24" not in changelog:
+              raise SystemExit("CHANGELOG.md does not contain the finalized v0.1.0 release entry")
+
+          notes = pathlib.Path(".github/release-notes/v0.1.0.md")
+          if not notes.is_file():
+              raise SystemExit("Missing v0.1.0 release notes")
+          PY
+
+      - name: Build wheel and source distribution
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
+        shell: bash
+        run: |
+          if gh release view v0.1.0 >/dev/null 2>&1; then
+            echo "v0.1.0 already exists; leaving the existing release unchanged."
+            exit 0
+          fi
+
+          gh release create v0.1.0 dist/* \
+            --target "$RELEASE_SHA" \
+            --title "Game Localizer v0.1.0" \
+            --notes-file .github/release-notes/v0.1.0.md \
+            --latest
