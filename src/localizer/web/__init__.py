@@ -11,6 +11,6 @@
 """
 
 from .collector import DashboardCollector
-from .server import DashboardServer, serve
+from .dashboard_server import DashboardServer, serve
 
 __all__ = ["DashboardCollector", "DashboardServer", "serve"]
