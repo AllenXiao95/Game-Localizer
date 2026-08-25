@@ -10,11 +10,13 @@ Game Localizer 是一套面向游戏文本的本地化流水线，而不是单�
 
 项目于 2026 年 8 月正式开源，但这套工作流并非从开源当月才开始形成，而是源于对《坦克世界》（Mir Tankov）俄服中文本地化的多年持续维护，并将多次真实游戏版本更新中验证过的实践抽象为可复用框架。相关汉化资源与发布元数据继续独立维护在 [`tanki-i18n-metadata`](https://github.com/AllenXiao95/tanki-i18n-metadata)，以便将可自由复用的框架代码与游戏特定内容、发布数据保持边界清晰。
 
+Game Localizer 不把完整资源文件转换成 TM。不同格式由 `ResourceAdapter` 投影成统一的 `TranslationUnit` 工作单元，TM 只持久化翻译知识与治理状态；最终仍由对应 Adapter 基于原始资源结构回写译文。详细边界见[核心架构与 Adapter 契约](docs/core-architecture.md)。
+
 ## 项目状态
 
 Game Localizer 当前是持续开发中的 pre-1.0 开源项目。仓库已具备跨平台 CI、自动化回归测试、完整 Git 历史密钥扫描、双语文档、示例项目，以及围绕 release / publish 的 QualityGate 与显式人工授权边界。
 
-下一条主要设计路线是 [M8 Agent 化工作流与 Tauri 客户端](docs/milestone-m8-agent-client.md)。该路线在实施前先公开设计，是为了让 Agent 权限、确定性校验、安全边界和人工审批要求能够被审阅，而不是把这些约束只留在实现细节中。
+下一阶段设计按 [M8：质量工程、受控智能与客户端产品化](docs/milestone-m8-agent-client.md)组织。M8 不是新的本地化内核：质量工程、可选的 Controlled Intelligence 与 Tauri 产品化是可独立验证的路线。
 
 - [参与贡献](CONTRIBUTING.md)
 - [安全策略](SECURITY.md)
@@ -37,6 +39,7 @@ Game Localizer 当前是持续开发中的 pre-1.0 开源项目。仓库已具�
 
 - [在线文档站](https://allenxiao95.github.io/Game-Localizer/)
 - [仓库内文档首页](docs/index.md)
+- [核心架构与 Adapter 契约](docs/core-architecture.md)
 - [首次安装](docs/getting-started.md)
 - [使用指南](docs/usage.md)
 - [`project.yaml` 配置参考](docs/project-configuration.md)
@@ -73,7 +76,7 @@ mkdocs serve
 - 社区平台工作流目前只有配置模型和离线同步组件，尚无在线 API 客户端。
 - Web 面板面向本机观测和单人定点修订，不是多人协作审批平台。
 - 远端发布需要相应可选依赖与环境凭据；只有显式声明凭据轮换事件时才启用治理拦截。
-- [M8 Agent 化工作流与 Tauri 客户端](docs/milestone-m8-agent-client.md)目前是设计提案。
+- [M8：质量工程、受控智能与客户端产品化](docs/milestone-m8-agent-client.md)目前是设计提案，各 track 不要求全部实现。
 
 ## 许可证
 
