@@ -10,11 +10,13 @@ Game Localizer is a localization pipeline for game text, not merely a machine-tr
 
 The project was open-sourced in August 2026, but the workflow itself grew out of several years of maintaining Chinese localization for *Mir Tankov*. Practices validated through recurring real game updates were generalized into this reusable framework. Localization resources and release metadata are maintained separately in [`tanki-i18n-metadata`](https://github.com/AllenXiao95/tanki-i18n-metadata), keeping redistributable framework code distinct from game-specific content and release data.
 
+Game Localizer does not normalize complete resource files into TM. Each resource format is projected by a `ResourceAdapter` into common `TranslationUnit` work units; TM persists translation knowledge and governance state only, and the owning Adapter writes resolved translations back against the original resource structure. See [Core Architecture and Adapter Contract](docs/en/core-architecture.md).
+
 ## Project status
 
 Game Localizer is an actively developed pre-1.0 open-source project. The current repository already includes cross-platform CI, automated regression coverage, full-history secret scanning, bilingual documentation, an example project, and explicit QualityGate / human-authorization boundaries around release and publishing workflows.
 
-The next major design track is [M8 Agentic Workflows and the Tauri Client](docs/en/milestone-m8-agent-client.md). It is intentionally documented as a proposal before implementation so agent permissions, deterministic validation, security boundaries, and human approval requirements remain reviewable.
+The next design phase is organized as [M8: Quality Engineering, Controlled Intelligence, and Productization](docs/en/milestone-m8-agent-client.md). M8 is not a new localization kernel: quality engineering, optional Controlled Intelligence, and Tauri productization are independently validated tracks.
 
 - [Contributing](CONTRIBUTING.md)
 - [Security policy](SECURITY.md)
@@ -37,6 +39,7 @@ The complete usage documentation now lives in one documentation site. This READM
 
 - [Documentation site](https://allenxiao95.github.io/Game-Localizer/en/)
 - [Documentation source](docs/en/index.md)
+- [Core Architecture and Adapter Contract](docs/en/core-architecture.md)
 - [First-time setup](docs/en/getting-started.md)
 - [Usage guide](docs/en/usage.md)
 - [`project.yaml` reference](docs/en/project-configuration.md)
@@ -73,7 +76,7 @@ mkdocs serve
 - Community-platform workflows currently have a configuration model and offline synchronization components, but no online API client.
 - The web dashboard targets local observability and targeted single-user revision, not multi-user approval workflows.
 - Remote publishing requires the relevant optional dependencies and environment credentials; the governance gate activates only for an explicitly declared credential-rotation event.
-- [M8 Agentic Workflows and the Tauri Client](docs/en/milestone-m8-agent-client.md) is currently a design proposal.
+- [M8: Quality Engineering, Controlled Intelligence, and Productization](docs/en/milestone-m8-agent-client.md) is currently a design proposal; its tracks are not all mandatory deliverables.
 
 ## License
 

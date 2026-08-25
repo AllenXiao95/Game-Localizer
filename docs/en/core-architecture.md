@@ -1,0 +1,213 @@
+# Game Localizer Core Architecture and Adapter Contract
+
+[中文](../core-architecture.md) | **English**
+
+This document defines the stable architectural boundary of Game Localizer. M8, Dashboard, CLI, Tauri, and any future intelligence layer must build on these boundaries instead of redefining resource, TM, QA, build, or publish semantics.
+
+## 1. Core model
+
+Game Localizer does not normalize complete resource files into TM and does not rebuild complete resource files from TM. The standard flow is:
+
+```text
+Original resource
+      │
+      ▼
+ResourceAdapter
+  projection
+      │
+      ▼
+TranslationUnit[]
+      │
+      ├── TM resolution
+      ├── model-assisted translation
+      ├── Prompt / glossary / rules
+      ├── deterministic QA
+      └── human review
+      │
+      ▼
+resolved translations
+      │
+      ▼
+ResourceAdapter.render(original source, resolved units)
+      │
+      ▼
+localized resource
+```
+
+Four core constraints apply:
+
+1. **The original resource is the structural source of truth.** File structure, ordering, non-translatable content, and format-specific information are not transferred to TM authority.
+2. **ResourceAdapter owns format-specific projection and reconstruction semantics.** It projects source resources into work units the translation core can consume, then writes resolved translations back against the original resource structure.
+3. **TranslationUnit is the canonical work-unit boundary consumed by the translation core.** It is not a universal serialization IR for all localization resources. A complex format may project one source node into zero, one, or many TranslationUnits while keeping reconstruction details inside the Adapter.
+4. **Translation knowledge, provenance, and review/authority state are domain state persisted by the TM repository.** The SQLite TM is neither the structural authority for source resources nor a resource interchange format.
+
+## 2. ResourceAdapter responsibility
+
+An Adapter is responsible for:
+
+- identifying resources it can handle;
+- scanning and providing stable resource identity;
+- projecting format-specific structures into TranslationUnits;
+- maintaining stable logical coordinates and preventing silent identity collisions;
+- exposing translation-level context, placeholder constraints, or other semantics when needed;
+- reconstructing target resources from the original source plus resolved translations;
+- validating basic correctness of reconstructed resources;
+- planning destination paths when the format itself encodes target-locale paths.
+
+An Adapter does not automatically own every format-adjacent operation. Archiving, signing, installation, upload, or invoking an external compiler may belong in Build / Artifact / Publish application services instead of being forced into the Adapter.
+
+## 3. TranslationUnit boundary
+
+TranslationUnit should contain only semantics the translation core actually needs, such as:
+
+- stable logical identity;
+- source text;
+- existing or candidate translation;
+- source / target locale;
+- translation context;
+- placeholders or other constraints;
+- limited metadata needed by QA, Prompt, or Review.
+
+The following should not automatically become first-class TranslationUnit fields merely because one new format needs them:
+
+- XML/AST node types;
+- quote style, indentation, or line number;
+- format-specific headers;
+- compiler parameters;
+- arbitrary selectors, variants, or node graphs.
+
+Rule of thumb: **if TM, Prompt, QA, and Review do not need to understand it, prefer keeping it inside the Adapter or opaque metadata.**
+
+## 4. TM repository boundary
+
+TM persists translation knowledge and governance state, including:
+
+- stable coordinate and source fingerprint;
+- translation;
+- provenance, run, model, and Prompt revision;
+- review, quality, and formal state;
+- match scope and migration history.
+
+TM does not:
+
+- preserve the complete source-file structure;
+- regenerate arbitrary resources from database rows;
+- parse PO/YAML/JSON source formats;
+- directly modify game resource files;
+- replace the Adapter reconstruction contract.
+
+When a source resource changes, the normal path is to project the current resource again through its Adapter, compare stable coordinates and source fingerprints, resolve reuse/staleness/retranslation through TM, then use the normal render/build path.
+
+## 5. Application-service authority
+
+ProjectRunner, TranslationPlanner, QA / QualityGate, Review, Build, Artifact, and Publish Python application services own deterministic workflow and governance semantics.
+
+CLI, Dashboard, Tauri, and Controlled Intelligence are callers of those services. They must not independently implement another set of:
+
+- resource parsing/writing rules;
+- TM authority policy;
+- QA rules;
+- Build / Release / Publish semantics.
+
+Future intelligence tools should expose application-level capabilities such as:
+
+```text
+project.inspect
+translation.plan
+tm.audit
+prompt.evaluate
+build.preview
+release.readiness
+```
+
+rather than low-level escape hatches such as:
+
+```text
+po.write
+yaml.patch
+sqlite.execute
+filesystem.write
+arbitrary shell
+```
+
+## 6. Adapter behavioral contract
+
+The Python `ResourceAdapter` Protocol defines interface shape; this section defines higher-level behavioral invariants.
+
+### 6.1 Identity
+
+- When only source text changes for the same logical item, the logical coordinate should remain stable where the source format permits; source changes are represented by the source fingerprint.
+- Duplicate coordinates that would collide on stable identity must fail deterministically or use explicit format-supported disambiguation. Silent overwrite is not acceptable.
+
+### 6.2 Projection
+
+- One resource node may project into zero, one, or many TranslationUnits.
+- The translation core should not need to understand the source-format AST in order to function.
+- Format-specific structure must not be discarded merely for the sake of normalization.
+
+### 6.3 Reconstruction
+
+- `render` must use the original source as its structural basis rather than reconstructing a complete resource only from TM rows.
+- Unmodified or filtered content must remain semantically unchanged.
+- Changing one TranslationUnit should not cause unrelated translation payload or non-translatable structure to change without a format-specific reason.
+
+### 6.4 Round-trip
+
+Every officially supported Adapter should satisfy at least a **semantic round-trip**:
+
+```text
+extract(source)
+→ render(unmodified units, source)
+→ extract(rendered)
+```
+
+The resulting logical identities and translatable semantics should be equivalent.
+
+`byte-preserving round-trip` is a stronger optional capability that may be declared per Adapter; it is not a universal hard requirement.
+
+### 6.5 Partial update
+
+Each Adapter should have regression coverage proving that changing a single work unit changes only the expected translation payload semantically while preserving unrelated resource structure.
+
+## 7. Adapter conformance direction
+
+Before expanding format support, prioritize conformance coverage for the currently documented Adapters:
+
+- Gettext PO/MO;
+- ParaTranz JSON;
+- Paradox YAML.
+
+A shared suite should exercise:
+
+```text
+fixture
+→ probe / scan / extract
+→ identity assertions
+→ no-op render
+→ semantic round-trip
+→ single-unit mutation
+→ re-render
+→ preservation assertions
+```
+
+External games/projects should first be treated as compatibility corpora and falsification targets. They can reveal real defects within the current public contract or repeated abstraction needs across multiple projects. A single project using an extra format or private syntax does not automatically expand the Game Localizer support boundary.
+
+## 8. Constraints on M8
+
+M8 is a consumer of the existing localization core, not a second localization architecture.
+
+Controlled Intelligence may:
+
+- synthesize evidence;
+- generate reviewable proposals;
+- invoke allowlisted application services;
+- request Apply / Release / Publish through explicit permission boundaries.
+
+It may not:
+
+- bypass Adapters to interpret and mutate arbitrary source formats directly;
+- treat TM as a resource IR;
+- establish a second set of QA / Build / Publish semantics;
+- turn model output into authority policy.
+
+The deterministic Game Localizer pipeline should remain fully usable even if Controlled Intelligence is removed entirely.
