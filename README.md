@@ -8,6 +8,11 @@
 
 Game Localizer 是一套面向游戏文本的本地化流水线，而不是单纯的机器翻译工具。它把资源扫描、翻译记忆、模型辅助翻译、质量检查、人工修订、制品构建和发布收敛到同一套可追踪流程中。
 
+<p align="center">
+  <img src="assets/dashboard-overview.png"
+       alt="Game Localizer Dashboard — Prepare, Preflight, Run, Validate, Repair, Build and Publish workflow">
+</p>
+
 项目于 2026 年 8 月正式开源，但这套工作流并非从开源当月才开始形成，而是源于对《坦克世界》（Mir Tankov）俄服中文本地化的多年持续维护，并将多次真实游戏版本更新中验证过的实践抽象为可复用框架。相关汉化资源与发布元数据继续独立维护在 [`tanki-i18n-metadata`](https://github.com/AllenXiao95/tanki-i18n-metadata)，以便将可自由复用的框架代码与游戏特定内容、发布数据保持边界清晰。
 
 Game Localizer 不把完整资源文件转换成 TM。不同格式由 `ResourceAdapter` 投影成统一的 `TranslationUnit` 工作单元，TM 只持久化翻译知识与治理状态；最终仍由对应 Adapter 基于原始资源结构回写译文。详细边界见[核心架构与 Adapter 契约](docs/core-architecture.md)。
