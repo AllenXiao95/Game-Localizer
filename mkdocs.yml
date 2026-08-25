@@ -59,7 +59,8 @@ nav:
       - 从存量资源构建 TM: tm-bootstrap.md
       - TM 与 SQLite: translation-memory.md
   - 设计:
-      - M8 Agent 与桌面客户端: milestone-m8-agent-client.md
+      - 核心架构与 Adapter 契约: core-architecture.md
+      - M8 质量工程、受控智能与产品化: milestone-m8-agent-client.md
       - M8 EvalCase v1 契约: m8-evalcase-v1-contract.md
   - English:
       - Overview: en/index.md
@@ -68,7 +69,8 @@ nav:
       - Project configuration: en/project-configuration.md
       - Build TM from existing resources: en/tm-bootstrap.md
       - TM and SQLite: en/translation-memory.md
-      - M8 agent and desktop client: en/milestone-m8-agent-client.md
+      - Core architecture and Adapter contract: en/core-architecture.md
+      - M8 quality engineering, controlled intelligence, and productization: en/milestone-m8-agent-client.md
       - M8 EvalCase v1 contract: en/m8-evalcase-v1-contract.md
 
 extra:
