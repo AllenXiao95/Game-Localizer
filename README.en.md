@@ -8,6 +8,11 @@
 
 Game Localizer is a localization pipeline for game text, not merely a machine-translation tool. It brings resource scanning, translation memory, model-assisted translation, quality assurance, human revision, artifact building, and publishing together in one traceable workflow.
 
+<p align="center">
+  <img src="assets/dashboard-overview.png"
+       alt="Game Localizer Dashboard — Prepare, Preflight, Run, Validate, Repair, Build and Publish workflow">
+</p>
+
 The project was open-sourced in August 2026, but the workflow itself grew out of several years of maintaining Chinese localization for *Mir Tankov*. Practices validated through recurring real game updates were generalized into this reusable framework. Localization resources and release metadata are maintained separately in [`tanki-i18n-metadata`](https://github.com/AllenXiao95/tanki-i18n-metadata), keeping redistributable framework code distinct from game-specific content and release data.
 
 Game Localizer does not normalize complete resource files into TM. Each resource format is projected by a `ResourceAdapter` into common `TranslationUnit` work units; TM persists translation knowledge and governance state only, and the owning Adapter writes resolved translations back against the original resource structure. See [Core Architecture and Adapter Contract](docs/en/core-architecture.md).
