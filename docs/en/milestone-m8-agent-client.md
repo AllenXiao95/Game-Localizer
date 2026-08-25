@@ -1,563 +1,289 @@
-# M8: Agentic Workflows and Tauri Client Design
+# M8: Quality Engineering, Controlled Intelligence, and Productization
 
 [中文](../milestone-m8-agent-client.md) | **English**
 
 - Status: design proposal
-- Target version: M8
-- Implementation status: not started
 - Scope: local, single-user game-localization pipelines
+- Roadmap umbrella: [#30](https://github.com/AllenXiao95/Game-Localizer/issues/30)
+- Core architecture constraints: [Game Localizer Core Architecture and Adapter Contract](core-architecture.md)
 
-## 1. Background and decision
+## 1. Positioning
 
-Game Localizer already provides resource scanning, a normalized translation-unit abstraction,
-SQLite TM, model-assisted translation, deterministic QA, QualityGate, human revision, artifact
-building, and publishing. The Dashboard already exposes local HTTP APIs for task preflight,
-execution, review, rebuild, and publishing.
+M8 is **not** a project to turn Game Localizer into a generic agent platform, nor is it a second localization architecture.
 
-M8 will not rewrite that business kernel. It will add two layers on top:
-
-1. A controlled agent orchestration layer that organizes TM validation, Prompt-material
-   construction, evaluation, and builds into planned, pausable, resumable, and auditable tasks.
-2. A Tauri desktop shell that packages the Python application as a sidecar, reuses the existing
-   WebUI and local API, and does not require end users to install Python or use a command line.
-
-The core decisions are:
-
-- The Python kernel remains the sole authority for configuration, TM, QA, QualityGate, build,
-  and publishing semantics.
-- Agents may invoke only allowlisted tools; they receive no arbitrary shell, unrestricted path,
-  or raw SQLite access.
-- Model judgments provide recommendations or evaluation signals only. They do not replace
-  deterministic checks for placeholders, terminology, formatting, or release governance.
-- Formal TM writes, release, and publish all require independent deterministic validation and
-  explicit human authorization.
-- Tauri manages windows, native dialogs, single-instance behavior, the sidecar lifecycle,
-  installation, and updates.
-- By default, the Python sidecar continues serving the WebUI to preserve same-origin APIs and
-  maximize reuse of the current implementation.
-
-## 2. Goals and non-goals
-
-### 2.1 Goals
-
-- Provide a TM inspection agent that finds stale, conflicting, duplicated, orphaned, malformed,
-  or incorrectly authoritative records and generates reviewable repair proposals.
-- Provide a Prompt workbench that assists with creating and maintaining the foundations of
-  `prompt.md`, `background.md`, `glossary.yaml`, and `rules.yaml`.
-- Build or compliantly reuse an i18n Prompt evaluation set so Prompt and model changes can be
-  compared reproducibly.
-- Provide a build agent that orchestrates validate, scan, plan, preview, QA, rebuild, release,
-  and publish while explaining every block with structured evidence.
-- Ship a Windows client based on Tauri + a Python sidecar while preserving explicit build
-  boundaries for macOS and Linux.
-- Keep the CLI, Dashboard, and desktop client on the same application services so that three
-  separate business implementations cannot drift apart.
-
-### 2.2 Non-goals
-
-- M8 will not build an online collaboration platform with accounts, permissions, task
-  assignment, and multi-user approval.
-- Agents will not autonomously accept legacy debt, promote glossary terms, overwrite
-  human-approved translations, or publish artifacts directly.
-- LLM judges will not replace the existing QualityGate.
-- Provider keys, publishing credentials, and archive passwords will not be written to Prompts,
-  project YAML, agent logs, or TM.
-- The first client installer will not include a large language model or Hugging Face model
-  weights.
-- M8 does not require all operating systems to ship at once. The first production target is
-  Windows x86-64.
-
-## 3. Overall architecture
+The existing deterministic kernel already owns:
 
 ```text
-┌──────────────────────── Tauri desktop ────────────────────────┐
-│ Window / menus / native pickers / single instance / updates  │
-│                         │                                     │
-│             startup, handshake, health check                  │
-└─────────────────────────┼─────────────────────────────────────┘
-                          │ stdin/stdout control channel
-┌─────────────────────────▼─────────────────────────────────────┐
-│              packaged Python sidecar                         │
-│  DashboardServer / Agent Orchestrator / application services │
-│          │                    │                    │           │
-│       Web API          deterministic tools       audit log    │
-└──────────┼────────────────────┼────────────────────┼───────────┘
-           │                    │                    │
-      existing WebUI      TM / QA / build      run artifacts
-                               │
-                 Provider / local publish / remote publish
+ResourceAdapter
+→ TranslationUnit
+→ TM resolution / translation / QA / review
+→ Build
+→ ResourceAdapter.render(original source, resolved units)
+→ Release / Publish
 ```
 
-Tauri does not duplicate Python domain logic. Apart from windows, file selection, credential
-bridging, sidecar management, and client updates, all business operations go through a versioned
-local API.
+M8 may only build on top of that kernel. If every Controlled Intelligence feature disappeared, the deterministic CLI / Dashboard localization, review, build, and publish workflow must remain fully usable.
 
-### 3.1 Sidecar startup protocol
-
-Add a dedicated entry point:
+M8 is now split into three related but independently optional tracks:
 
 ```text
-localizer-sidecar desktop-server --config <project.yaml> --port 0
+Track A — Quality Engineering
+├── Eval Harness
+└── deterministic TM Audit
+
+Track B — Controlled Intelligence
+├── Prompt Workbench
+├── optional TM Repair Advisor
+└── optional Release Readiness Advisor
+
+Track C — Productization
+└── Windows Tauri client
 ```
 
-Protocol requirements:
+These tracks are not a waterfall of “AgentRuntime → TM Agent → Prompt Agent → Build Agent → Desktop”.
 
-1. Tauri starts the sidecar and passes session material through stdin or controlled IPC. Secrets
-   must not appear in command-line arguments, URLs, or persistent logs.
-2. The sidecar binds to a random port on `127.0.0.1`.
-3. The sidecar writes one machine-readable handshake record to stdout containing at least the
-   `protocol_version`, port, PID, and project identity. Subsequent business logs go to stderr or
-   structured log files and must not contaminate the handshake channel.
-4. Tauri calls `/api/health` and shows the main window only after the API protocol and project
-   configuration are ready.
-5. The WebUI obtains a short-lived session capability through Tauri IPC and attaches it to write
-   requests. The capability must not be placed in a query string or local storage.
-6. On exit, Tauri first checks run state. With no active task it shuts down gracefully. With an
-   active task, the user chooses whether to keep it in the tray, wait, or confirm cancellation;
-   the client must not silently kill a process writing a checkpoint or TM.
-7. If Tauri exits unexpectedly, the sidecar detects the missing parent and performs bounded
-   cleanup. The next launch reuses existing owner-lock, task-snapshot, and checkpoint recovery
-   rules.
+## 2. Core boundaries M8 must preserve
 
-### 3.2 Local security boundary
+M8 follows the project-level invariants:
 
-- Bind to loopback only; production builds do not expose `--host 0.0.0.0`.
-- Generate a new session capability on every launch and validate it, together with the existing
-  action header, on all write APIs.
-- Prevent arbitrary external navigation in the WebView. New windows and external links go to the
-  system browser through an allowlist.
-- Paths returned by Tauri dialogs are still validated by Python using `resolve(strict=True)` and
-  scope checks.
-- Version the sidecar API and fail closed when the client and sidecar protocols do not match.
-- Store credentials in operating-system credential facilities or another reviewed secure store,
-  and inject them into the sidecar only for a single task execution.
-- The agent tool layer rejects arbitrary SQL, Python expressions, shell commands, and
-  unconstrained paths.
+1. The original resource is the structural source of truth.
+2. ResourceAdapter owns format-specific projection and reconstruction semantics.
+3. TranslationUnit is the canonical work-unit boundary consumed by the translation core, not a universal resource IR.
+4. Translation knowledge, provenance, and review/authority state are domain state persisted by the TM repository; TM is not a resource interchange format.
+5. ProjectRunner, Planner, QA / QualityGate, Review, Build, Artifact, and Publish application services remain authoritative for deterministic workflow semantics.
+6. CLI, Dashboard, Tauri, and Controlled Intelligence are callers of application services and may not own parallel resource, TM, QA, Build, or Publish semantics.
 
-## 4. Agent execution model
-
-Here, an agent is a combination of model planning, deterministic tools, and a state machine—not a
-chatbot with machine-control privileges. Every AgentRun produces an immutable plan and an
-append-only event record.
-
-### 4.1 Shared state machine
+Agent/advisor tools should stay at application-level granularity, for example:
 
 ```text
-draft → planned → awaiting_approval → running → verifying → completed
-                   │                  │          │
-                   └→ rejected        ├→ paused  └→ failed
-                                      └→ failed
+project.inspect
+translation.plan
+tm.audit
+prompt.evaluate
+build.preview
+release.readiness
 ```
 
-Every step records at least:
-
-- `agent_run_id`, agent type, and protocol version;
-- project, resource variant, game version, and operator;
-- configuration revision, source-resource fingerprint, TM revision, Prompt revision, and
-  evaluation-set version;
-- model, Provider, sampling parameters, tokens/cost, and tool calls;
-- input/output summaries, generated files, deterministic validation results, and human decisions;
-- recovery point, failure classification, and recommended next action.
-
-Agent output cannot exist only as natural language. Every plan, repair proposal, and execution
-result must conform to a versioned JSON schema.
-
-### 4.2 Tool permission levels
-
-| Level | Examples | Default authorization |
-| --- | --- | --- |
-| Inspect | Config validation, scan, TM query, QA summary, Prompt lint | Automatic and read-only |
-| Propose | Generate TM patch, Prompt patch, or build plan | Automatic; writes only to an isolated proposal directory |
-| Apply | Apply TM or Prompt repair | Human confirmation; backup and fingerprint recheck first |
-| Release | Production build or debt acceptance | Explicit confirmation every time; debt acceptance may require a higher privilege |
-| Publish | Upload to a remote target | Separate from release; confirm each target independently |
-
-A model cannot turn a lower-level tool call into a higher-level action. Python application
-services enforce permissions; Prompt instructions do not define the security boundary.
-
-## 5. TM validation agent
-
-### 5.1 Read-only inspection scope
-
-The first TM-agent pass is inspection-only and covers at least:
-
-- SQLite schema and integrity, WAL state, and the ability to create a recoverable backup;
-- source-fingerprint drift at a stable coordinate, stale formal records, and abnormal
-  shadow/formal state;
-- multiple translations for the same source, coordinate conflicts, duplicate records, and
-  unreachable or orphaned records;
-- authority precedence among human-approved content, machine candidates, historical migration,
-  and ParaTranz synchronization;
-- placeholders, control characters, source-language residue, normalization, and approved-term
-  violations;
-- traceability of run, model, Prompt hash, reviewer, and provenance fields;
-- changes in TM coverage, match scopes, and untranslated counts against the current resource scan.
-
-Inspection produces a unified `tm-audit.json`. Every issue includes a stable identity, severity,
-evidence, recommended action, and whether an automatic repair proposal can be generated.
-
-### 5.2 Repair proposal and application
-
-The TM agent does not modify the database directly. It first generates
-`tm-repair-plan.json`:
-
-- The plan is bound to the database file identity, pre-transaction revision, resource
-  fingerprint, and configuration revision.
-- Every action declares its previous value, target value, rationale, provenance, and rollback
-  information.
-- Formal retirement, authority switching, bulk unification, and deletion actions are grouped
-  separately.
-- Before applying a plan, create a consistent backup through the SQLite backup API.
-- At apply time, revalidate the plan fingerprint and execute inside a single transaction.
-- After application, rerun TM audit, translation planning, and relevant QA. Roll back the
-  transaction and retain the report if validation fails.
-- Do not overwrite a higher-authority human record unless the user explicitly authorizes it
-  through a dedicated governance entry point.
-
-The first version may automatically propose deletion, authority switching, and legacy-debt
-acceptance, but it cannot apply them automatically.
-
-## 6. Prompt foundation and design agent
-
-### 6.1 Prompt-material boundaries
-
-The Prompt agent manages project-level foundation materials:
-
-- `prompt.md`: target language, tone, form of address, naming, and formatting requirements;
-- `background.md`: world building, UI context, character relationships, and usage context;
-- `glossary.yaml`: structured, reviewable, and optionally scoped terminology;
-- `rules.yaml`: filtering, normalization, and deterministic QA rules.
-
-Batch numbering, output protocol, actual source text, and structured glossary injection remain
-assembled by Python code such as `PromptComposer`, so projects do not copy protocol text. Agents
-must not write runtime data, credentials, or evaluation answers into project Prompts.
-
-### 6.2 Workflow
+Do not expose low-level escape hatches such as:
 
 ```text
-project metadata/samples → inventory → scaffold → lint → eval → diff → human acceptance
-                         → versioned files
+arbitrary shell
+raw SQL
+raw Python
+unscoped filesystem writes
+po.write / yaml.patch / adapter.raw_render
 ```
 
-The Prompt agent supports:
+## 3. Track A — Quality Engineering
 
-- generating initial materials from locales, the resource adapter, representative text samples,
-  and a user-provided style target;
-- finding duplication or conflicts across Prompt, background, glossary, and rules;
-- moving deterministically expressible constraints into glossary/rules instead of continuing to
-  accumulate natural-language instructions;
-- generating file-level patches without silently overwriting existing content;
-- running the same evaluation set before and after a change and showing quality, cost, and latency
-  differences;
-- storing a Prompt bundle manifest containing material digests and the assembler version;
-- locking an accepted published Prompt baseline and retaining its revision identity in release
-  manifests.
+Quality Engineering is the least speculative M8 work and remains useful even if no broader agentic runtime is ever built.
 
-## 7. i18n Prompt evaluation set
+### 3.1 Eval Harness — #9
 
-### 7.1 Construction and reuse principles
+Goal: reproducibly answer whether a Prompt / model / config change improves localization quality without deterministic regressions, and how cost/latency changes.
 
-M8 is expected to combine compliantly reusable public data with original synthetic and regression
-cases rather than copying game text with unknown licensing. Before importing external data, record:
+Principles:
 
-- original source, version, license, and permitted use and redistribution;
-- language pair, domain, cleaning, and transformation methods;
-- whether it contains personal information, unpublished text, or restricted material;
-- differences from real project distributions and known bias.
+- deterministic assertions are the first authority layer;
+- baseline diff is a core artifact;
+- model judging is limited to semantic/style dimensions that cannot be expressed deterministically and is report-only initially;
+- public / development / locked cases remain clearly separated;
+- Eval does not reimplement resource parsers; when production resource semantics are needed, enter through TranslationUnit / production validation capabilities;
+- keep independent fixture oracles as well, so production code does not generate its own expected answers and test itself.
 
-Data with uncertain provenance or licensing may be used only for temporary local research and
-cannot enter the repository or public benchmark. Real-project regression cases require
-authorization and de-identification. The public default set should prefer original synthetic,
-public-domain, or explicitly compatible-licensed text.
+The shared EvalCase v1 contract was frozen by #32 / #33. Existing #13 and #15 continue under their current scopes; this roadmap realignment does not modify the #13 contributor contract.
 
-### 7.2 Evaluation dimensions
+### 3.2 Deterministic TM Audit — #8
 
-- Response protocol: numbering, item count, terminator, and JSON/text structural completeness.
-- Placeholders and markup: printf, Python, ICU, XML/BBCode, escapes, newlines, and custom game
-  tokens.
-- Terminology: required terms, prohibited renderings, casing, inflection, and path scope.
-- Semantics: omission, addition, negation, numbers, units, entities, and reference resolution.
-- Locale conventions: punctuation, spacing, numbers, dates, plural forms, honorifics, gender, and
-  locale-specific formatting.
-- UI constraints: short button text, width budgets, menu consistency, and shortcut markers.
-- Style and register: character voice, system messages, narrative text, and age rating.
-- Consistency: identical source text, cross-file entities, contextual variants, and historical
-  baselines.
-- Robustness: prompt-injection-like source text, mixed languages, unusual Unicode, long text, and
-  incomplete context.
-- Cost and performance: input/output tokens, latency, failure rate, repair retries, and batch
-  throughput.
+TM audit has two domains.
 
-### 7.3 Proposed data format
+**TM-internal audit** may directly inspect:
 
-```json
-{
-  "schema_version": 1,
-  "id": "placeholder.printf.001",
-  "source_locale": "en-US",
-  "target_locale": "zh-Hans",
-  "domain": "game-ui",
-  "source": "Welcome, %s! You have %d coins.",
-  "context": {"screen": "login-reward", "max_chars": 40},
-  "glossary": [],
-  "required_tokens": ["%s", "%d"],
-  "references": ["欢迎你，%s！你有 %d 枚金币。"],
-  "assertions": ["protocol", "placeholder_set", "number_fidelity"],
-  "provenance": {"kind": "synthetic", "license": "CC0-1.0"},
-  "difficulty": "basic",
-  "tags": ["ui", "printf"]
-}
-```
+- SQLite schema / integrity / WAL / backup readiness;
+- formal / shadow / review / provenance state;
+- authority combinations, internal conflicts, duplicates, or inconsistent records.
 
-Proposed directory:
+**Project-correlated audit** should reuse existing application evidence for:
+
+- current source-fingerprint drift;
+- orphan / unreachable coordinates;
+- coverage / match-scope / pending deltas;
+- anomalies correlated with current TranslationUnit / TranslationPlan / QA state.
+
+The TM Auditor must not grow its own PO/YAML/JSON parser.
+
+Historical audit implementation and tests already exist. The goal is therefore **legacy behavior parity plus adaptation into the current architecture**, not writing a second auditor from scratch. Legacy code acts as an executable specification / regression oracle while the final implementation reuses current TM, Adapter, Planner, and QA capabilities.
+
+## 4. Track B — Controlled Intelligence
+
+Controlled Intelligence is reserved for work that actually needs open-ended evidence synthesis, option comparison, or dynamic next-step selection.
+
+Before adding an intelligent capability, all must be true:
+
+1. the task contains meaningful open-ended judgment rather than a fixed sequence;
+2. model errors can be constrained or detected by deterministic validation or permissions;
+3. the capability materially reduces operator cognitive load compared with the existing Dashboard / CLI.
+
+Otherwise, implement normal application logic.
+
+### 4.1 Prompt Workbench — #10
+
+This remains the primary potentially valuable intelligence use case.
+
+Recommended flow:
 
 ```text
-evals/i18n-prompt/
-├── manifest.yaml
-├── cases/
-│   ├── protocol.jsonl
-│   ├── placeholders.jsonl
-│   ├── terminology.jsonl
-│   ├── semantics.jsonl
-│   └── locale-style.jsonl
-├── rubrics/
-│   └── semantic-fidelity.yaml
-└── baselines/
-    └── <prompt-bundle>-<provider-model>.json
+inventory / lint
+→ reviewable patch proposal
+→ before / after Eval
+→ evidence
+→ human accept / reject
+→ baseline lock
 ```
 
-### 7.4 Scoring and gates
+Boundaries:
 
-Scoring has three layers:
+- Prompt Workbench does not parse PO/YAML/JSON resources directly;
+- format-specific translation context enters only through Adapter / TranslationUnit / application capabilities;
+- Python Prompt composition remains the protocol authority;
+- deterministic hard regressions cannot be overridden by model preference;
+- the first version should prove a useful non-agent CLI/service path before proposal orchestration is added.
 
-1. Deterministic assertions for protocol, placeholders, numbers, length, terminology, and format.
-2. Reference- and rule-based scoring through normalized matching, multiple accepted references,
-   and character/word-level differences.
-3. Model judging and human sampling only for semantics, register, and style that cannot be judged
-   deterministically.
+### 4.2 TM Repair Advisor — #31
 
-Every model-judge result records the judge model, Prompt, parameters, and raw rationale, and the
-judge is calibrated against a fixed sample. In the first version, model judging produces reports
-only and does not directly block release. Hard gates should favor deterministic metrics, for
-example:
+This is an optional follow-up to #8, not a mandatory deliverable.
 
-- Protocol completeness and placeholder preservation must be 100%.
-- No new hard number or entity errors are allowed.
-- Deterministic failure counts must not regress relative to an accepted baseline.
-- Semantic/style scores below baseline request human review instead of automatically rewriting
-  formal TM.
+Use a model only if deterministic findings actually require open-ended causal analysis, grouping, prioritization, or multi-option repair reasoning.
 
-The development set may be used to iterate on Prompts. A locked test set must not be injected into
-Prompts, background, or few-shot examples, preventing answer-specific overfitting. Reports compare
-quality, cost, and latency rather than optimizing only one aggregate score.
-
-## 8. Build agent
-
-The build agent reuses the existing ProjectRunner and web task service; it does not reimplement the
-pipeline. Proposed tool split:
-
-| Tool | Permission | Artifact |
-| --- | --- | --- |
-| `project.validate` | Inspect | Configuration diagnostics |
-| `resource.scan` | Inspect | Scan manifest and resource fingerprint |
-| `tm.audit` | Inspect | TM audit report |
-| `translation.plan` | Inspect | Translation plan and cost estimate |
-| `prompt.evaluate` | Inspect | Evaluation report and baseline diff |
-| `build.preview` | Apply | Preview, QA, and checkpoint |
-| `review.propose` | Propose | Revision proposal without formal TM writes |
-| `build.release` | Release | Release manifest and artifact |
-| `publish.prepare` | Inspect | Targets, credential status, and read-back plan |
-| `publish.execute` | Publish | Per-target publishing result |
-
-Recommended execution order:
+Normal flow:
 
 ```text
-validate → scan → TM audit → translation plan → prompt baseline check
-         → preview → QA → human revision/incremental rebuild
-         → release preflight → human confirmation → release
-         → publish preflight → per-target confirmation → publish + read-back
+tm-audit.json
+→ reviewable repair proposal
+→ explicit Apply approval
+→ TM repository mutation
+→ re-audit / re-plan / QA
+→ normal Build
+→ Adapter.render
 ```
 
-Constraints:
+TM repair never directly mutates source/resource files. Resource changes occur only through the normal TranslationPlan / Build / Adapter-render path.
 
-- The agent first presents the plan, estimated model-call volume, write locations, and irreversible
-  actions.
-- Preview may execute automatically after the user approves one workflow. Release and publish
-  cannot reuse a vague, long-lived authorization.
-- Revalidate source/config/TM/Prompt fingerprints before and after execution; replan on drift.
-- A QualityGate failure can lead only to explanation, revision proposals, or rebuild. The agent
-  cannot bypass the gate by lowering severity.
-- Publish and release are separate authorization domains. Each publishing target returns its own
-  success, failure, and retryable state.
-- Task recovery continues to reuse checkpoints and does not repay already successful model calls.
+### 4.3 Governed orchestration — #7
 
-## 9. Client user experience
+#7 is not a prerequisite for Quality Engineering and must not become a generic harness merely because multiple advisor ideas exist on the roadmap.
 
-The first client version provides at least:
-
-- Welcome page: open `project.yaml`, recent projects, and remove invalid recent entries.
-- Project page: reuse the current Dashboard and add native source-directory, single-file, and
-  `.env` picker buttons.
-- Agent center: show plan, permission level, estimated cost, current step, evidence, and actions
-  awaiting confirmation.
-- Prompt workbench: material diff, lint, evaluation-set selection, baseline comparison, and patch
-  acceptance.
-- TM inspection: issue clusters, repair proposals, backup location, and post-apply verification.
-- Task tray: long-running background work, reopen window, and exit confirmation.
-- Diagnostic bundle: export redacted logs, versions, and environment state after explicit user
-  selection; exclude credentials and original private text.
-- About/update page: client, sidecar, API protocol, and data-schema versions.
-
-Client-owned data follows platform application-data conventions instead of the installation
-directory:
+If #10 / #31 or other real workflows show duplicated plan / approval / event / recovery needs, extract the smallest shared protocol:
 
 ```text
-<app-data>/game-localizer/
-├── client.json
-├── logs/
-├── diagnostics/
-└── updates/
+LLM/planner
+→ reviewable proposal/plan
+→ allowlisted application tool
+→ deterministic service
+→ verification
 ```
 
-Project TM, workspace, and output remain defined by `project.yaml`; client upgrades must not move
-or delete them.
+Permissions remain Inspect / Propose / Apply / Release / Publish and fail closed in Python application services.
 
-## 10. Proposed code and artifact layout
+### 4.4 Release Readiness Advisor — #11
+
+Keep this P2 and usage-driven.
+
+Phase 1 only synthesizes evidence: why is the release blocked, which blockers actually matter, and what is the minimum safe recovery path?
+
+It consumes existing ResourceScanner / Planner / TM audit / Eval / QualityGate / artifact / publish-receipt evidence. It does not parse resource formats independently, rebuild the fixed Dashboard sequence as chat, or assume a future Build Agent.
+
+If it merely restates Prepare → Preflight → Run → Validate → Repair → Build → Publish, it should not expand.
+
+## 5. Track C — Productization
+
+### Windows Tauri client — #12
+
+Tauri is an independent productization track with no dependency on whether an Agent runtime exists.
+
+The thinnest technical validation is:
 
 ```text
-src/localizer/agent/
-├── models.py          # AgentRun, plan, permission, and event schemas
-├── orchestrator.py    # State machine, recovery, and approval
-├── tools/
-│   ├── tm.py
-│   ├── prompt.py
-│   └── build.py
-└── audit.py            # Append-only audit events
-
-src/localizer/web/
-├── server.py           # /api/agent/*, /api/health, session validation
-└── static/index.html   # Agent/Prompt/TM UI; split static assets later if needed
-
-src-tauri/
-├── src/                # Sidecar lifecycle, windows, tray, and native capabilities
-├── capabilities/       # Minimum-permission allowlist
-└── tauri.conf.json
-
-evals/i18n-prompt/      # Compliant evaluation data, rubrics, and baselines
+Tauri
+→ packaged Python sidecar
+→ 127.0.0.1 random port
+→ versioned health/session handshake
+→ existing Dashboard
 ```
 
-All data crossing the Tauri/Python boundary has a schema and `protocol_version`. Tauri understands
-only the client control protocol and generic task states, not TM classifications or QualityGate
-details.
+Tauri owns windows, native file pickers, single-instance behavior, sidecar lifecycle, installation, and updates. Python application services continue to own localization, TM, QA, Build, Release, and Publish semantics.
 
-## 11. Delivery stages
+The first prototype proves packaging/lifecycle feasibility only. Do not expand the desktop product merely to “complete M8” without evidence of user value.
 
-### M8.1: Protocol and agent foundations
+## 6. Adapter Conformance and cross-project validation
 
-- Define AgentRun, plan, event, approval, and tool-result schemas.
-- Add an append-only agent audit log and resumable state machine.
-- Build allowlisted tool adapters over existing application services.
-- Add API versioning, health checks, and session capabilities.
-- Cover privilege escalation, fingerprint drift, and recovery with a fake planner/provider.
+M8 discussions exposed a more fundamental engineering need: officially supported Adapters should have a shared behavioral contract and conformance coverage.
 
-### M8.2: Prompt workbench and evaluation set
+The current public format boundary remains unchanged:
 
-- Complete the Prompt bundle manifest and linting.
-- Complete evaluation-set manifest, JSONL schema, license checks, and data versioning.
-- Start with deterministic protocol, placeholder, number, and terminology cases.
-- Add semantic/style rubrics and human sampling without making them release hard gates.
-- Produce at least one reproducible baseline for an existing example Prompt.
+- Gettext PO/MO;
+- ParaTranz JSON;
+- Paradox YAML.
 
-### M8.3: TM and build agents
+Before adding new formats, prioritize verification of:
 
-- Implement read-only TM audit and structured repair proposals.
-- Implement backup, fingerprint recheck, transactional application, and post-apply verification.
-- Implement preview orchestration, QA explanation, and incremental rebuild.
-- Keep release and publish approvals independent and add privilege-boundary regression tests.
+- identity stability / collision behavior;
+- projection semantics;
+- no-op semantic round-trip;
+- single-unit partial update;
+- unrelated structure preservation;
+- destination planning;
+- render validation.
 
-### M8.4: Tauri Windows client
+External games should first serve as static compatibility corpora and falsification targets, not as automatic requirement generators. A project using `.pot`, Fluent, Qt TS, or private placeholder syntax does not by itself expand the roadmap.
 
-- Produce the Windows Python sidecar with either PyInstaller or Nuitka through a fixed,
-  reproducible build.
-- Implement sidecar handshake, random port, window, file dialogs, single-instance behavior, and
-  tray in Tauri.
-- Require no system Python and do not include tokenizer weights in the installer.
-- Add Windows installation, update, uninstall, and abnormal-exit smoke tests.
-- Complete code signing, third-party notices, and the GPL corresponding-source delivery process.
+Promote a compatibility observation into implementation work only when at least one is true:
 
-### M8.5: Cross-platform and release hardening
+1. the current public support contract contains a real defect;
+2. two or more real projects repeatedly need the same generic capability;
+3. a selected cross-project target cannot work under the current Adapter contract and a non-game-specific improvement can be stated;
+4. the project deliberately expands its public support boundary.
 
-- Add macOS and Linux sidecar/client build matrices.
-- Verify WebUI behavior under WKWebView and WebKitGTK.
-- Complete macOS signing/notarization and per-platform update artifacts.
-- Establish a client/sidecar protocol compatibility matrix and rollback drills.
+## 7. Dependency model
 
-## 12. Acceptance criteria
+Think in parallel tracks rather than one chain:
 
-### Agent and governance
+```text
+Core localization architecture
+        │
+        ├── Adapter Contract / Conformance
+        │
+        ├── Quality Engineering
+        │      ├── #13 / #15
+        │      ├── #9 Eval Harness
+        │      └── #8 TM Audit migration
+        │
+        ├── Controlled Intelligence (conditional)
+        │      ├── #10 Prompt Workbench
+        │      ├── #31 TM Repair Advisor
+        │      ├── #7 minimal shared orchestration if duplication appears
+        │      └── #11 Release Readiness Advisor
+        │
+        └── Productization
+               └── #12 Tauri
+```
 
-- An agent cannot execute arbitrary shell, SQL, or out-of-scope path access through Prompts or tool
-  parameters.
-- Inspect and Propose do not modify formal project data.
-- TM Apply requires a consistent backup, human approval, and an unchanged plan fingerprint.
-- An agent cannot overwrite higher-authority human TM, accept legacy debt, or bypass QualityGate.
-- Release and every remote publish leave independent human decisions and append-only audit records.
-- An interrupted agent resumes from the last committed step without repeating successful model
-  requests.
+## 8. Stop conditions
 
-### Prompt evaluation
+M8 does not define success as “implement every issue”.
 
-- Every evaluation case has a stable ID, version, provenance, and license field.
-- Locked test and development sets are separated, and reports demonstrate that test answers did
-  not enter the evaluated Prompt.
-- The same Prompt bundle, model snapshot/identity, and parameters produce structurally consistent
-  reports.
-- Deterministic code can independently recompute protocol, placeholder, terminology, and numeric
-  metrics.
-- Baseline reports include quality, failure categories, tokens, cost, and latency.
-- A model judge alone cannot promote a failing result to release-ready status.
+Valid outcomes include:
 
-### Client
+- Eval + TM audit provide enough value and no broader Agent is implemented;
+- Prompt Workbench remains deterministic tooling rather than becoming conversational;
+- most TM findings have deterministic repairs, so #31 never needs an LLM advisor;
+- Release Readiness adds no measurable value beyond Dashboard, so #11 remains unimplemented;
+- the Tauri thin POC does not demonstrate enough user benefit, so productization pauses.
 
-- On a clean Windows environment, a user can open a project and run preview without installing
-  Python.
-- The sidecar uses a random loopback port and rejects write requests without the current session
-  capability.
-- For identical input, client and CLI produce identical plan, QA, manifest, and TM results.
-- Closing the window during a run does not corrupt checkpoint/TM, and the user can resume or keep
-  the task running in the background.
-- Install, update, and uninstall do not delete project TM, workspace, output, or user-selected game
-  resources.
-- The installer provides signatures, versions, third-party notices, and a corresponding-source
-  access path.
-- The existing full test suite continues to pass, with added sidecar-protocol and client smoke
-  tests.
+Project maturity includes making evidence-based decisions **not to implement** roadmap hypotheses.
 
-## 13. Risks and mitigations
+## 9. Documentation responsibility
 
-| Risk | Mitigation |
-| --- | --- |
-| Agent hallucination or privilege escalation | Allowlisted tools, permission levels, schema validation, deterministic gates, and human approval |
-| Prompt overfitting to the evaluation set | Separate development/locked test sets, hidden tests, category-level regression, and real human sampling |
-| Unclear external-data licensing | Require provenance/license; default to original synthetic or compatible-licensed data |
-| Bulk TM repair damages authoritative data | Consistent SQLite backup, transaction, fingerprint, authority precedence, and post-apply validation |
-| Tauri/sidecar lifecycle mismatch | Versioned handshake, parent detection, health checks, tray policy, and crash-recovery tests |
-| Oversized Python package | Package only target dependencies, omit model weights, and start with a directory-mode sidecar |
-| Cross-platform WebView differences | Ship Windows first; later add real macOS/Linux builds and UI smoke tests |
-| Automatic update damages data | Update application files only; keep project data external and make protocol migrations reversible |
+This page owns stable architecture constraints, track relationships, and decision rules only.
 
-## 14. Decisions to freeze before implementation
-
-Before M8.1 begins, design review must decide:
-
-1. The first Provider interface for the agent planner and its offline fake implementation.
-2. Whether agent audit uses JSONL files, a dedicated SQLite table, or both.
-3. How Tauri passes session capabilities to the sidecar and how protocol versions are managed.
-4. Whether the Windows sidecar uses PyInstaller or Nuitka, and directory or one-file delivery.
-5. Whether credentials are managed by Tauri secure storage or Python keyring.
-6. License-review results and redistribution terms for the first public i18n data sources.
-7. Which deterministic evaluation metrics become hard gates for Prompt baselines.
-8. The default behavior when closing a window during a run and the exact meaning of “cancel task.”
-
-Schema prototypes and read-only evaluation may proceed before these decisions are frozen, but
-formal TM Apply, automatic updates, and remote publish agents should not be implemented early.
+Concrete schemas, acceptance criteria, implementation slices, and contributor scopes remain in the corresponding GitHub issues so this design page does not drift by duplicating issue details.
