@@ -363,14 +363,27 @@ class SQLiteTranslationMemory:
         还会把它踢出 `legacy_source_candidates`，从而改变同源收敛的多数派统计、
         波及一批与本次决策毫无关系的坐标。
 
-        这里也**不归档到 source history**：人工明确退休意味着这条译文不能再被
-        自动复用；若把它归档，下一次相同源文反而会从历史层把它复活。
+        这里也**不归档到 source history**：人工明确退休意味着当前 source fingerprint
+        必须重新进入待翻译状态。若同一 fingerprint 早先已有 machine/formal 历史，
+        也必须在同一事务里删除该 exact-history fallback，否则删掉 human 行后它会被
+        `coordinate_history` 立即复活。其它 sibling source fingerprint 的历史不受影响。
         """
         keys = [str(value) for value in identities if value]
         if not keys:
             return 0
         marks = ",".join("?" for _ in keys)
         with self.transaction() as connection:
+            retiring = connection.execute(
+                f"SELECT stable_identity, source_fingerprint FROM tm_entries "
+                f"WHERE stable_identity IN ({marks}) AND origin = 'human'",
+                keys,
+            ).fetchall()
+            for row in retiring:
+                connection.execute(
+                    "DELETE FROM tm_source_history "
+                    "WHERE stable_identity = ? AND source_fingerprint = ?",
+                    (row["stable_identity"], row["source_fingerprint"]),
+                )
             cursor = connection.execute(
                 f"DELETE FROM tm_entries WHERE stable_identity IN ({marks}) "
                 f"AND origin = 'human'",
