@@ -75,6 +75,9 @@ class TMSourceHistoryTests(unittest.TestCase):
             database = Path(temp) / "tm.sqlite"
             ru_1440 = self._entry("ru-1.44.0", "RU translation", run_id="ru-1440")
             pt_1450 = self._entry("pt-1.45.0", "PT translation", run_id="pt-1450")
+            ru_return = self._entry(
+                "ru-1.44.0", "", run_id="ru-1441", formal=False
+            )
 
             with SQLiteTranslationMemory(database) as tm:
                 tm.upsert(ru_1440)
@@ -83,9 +86,17 @@ class TMSourceHistoryTests(unittest.TestCase):
                 )
                 tm.upsert(pt_1450)
 
-                stale = tm.stale_formal_identities([ru_1440])
+                stale = tm.stale_formal_identities([ru_return])
+                historical = tm.lookup(
+                    ru_return.stable_identity,
+                    source_fingerprint=ru_return.source_fingerprint,
+                    allow_shadow=True,
+                )
 
             self.assertEqual((), stale)
+            self.assertIsNotNone(historical)
+            self.assertEqual("RU translation", historical.translation)
+            self.assertEqual("coordinate_history", historical.match_scope)
 
     def test_unseen_source_still_requires_normal_stale_handling(self) -> None:
         """History is an exact baseline only; it must not hide a real new RU patch."""
