@@ -281,17 +281,53 @@ class ArtifactBuilder:
         release_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         metrics = metadata.get("translation_metrics")
         metrics = metrics if isinstance(metrics, Mapping) else {}
+        metrics_scope = str(metadata.get("translation_metrics_scope") or "")
+        evidence_runs = metadata.get("translation_evidence_runs")
         release_name = f"汉化自动发布 {release_timestamp}" if release_slug else ""
         release_body = ""
         if release_slug:
             total_tokens = int(metrics.get("input_tokens", 0) or 0) + int(
                 metrics.get("output_tokens", 0) or 0
             )
-            body_lines = [
-                f"发布完成于 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-                f"API 调用: {int(metrics.get('requests', 0) or 0)} 次",
-                f"翻译条数: {int(metrics.get('translation_units_total', 0) or 0)}",
-            ]
+            completed_line = f"发布完成于 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            if metrics_scope == "contributing_run_execution":
+                contributing_run_ids = []
+                if isinstance(evidence_runs, Sequence) and not isinstance(
+                    evidence_runs, (str, bytes)
+                ):
+                    for item in evidence_runs:
+                        if not isinstance(item, Mapping):
+                            continue
+                        contributing_run_id = str(item.get("run_id") or "").strip()
+                        if (
+                            contributing_run_id
+                            and contributing_run_id not in contributing_run_ids
+                        ):
+                            contributing_run_ids.append(contributing_run_id)
+                body_lines = [
+                    completed_line,
+                    "翻译执行证据：以下指标按贡献 Provider 运行聚合；"
+                    "不代表最终制品的精确去重词条数或生命周期成本。",
+                ]
+                if contributing_run_ids:
+                    body_lines.append(
+                        f"贡献 Provider 运行: {len(contributing_run_ids)} 个"
+                    )
+                body_lines.extend(
+                    [
+                        f"API 调用: {int(metrics.get('requests', 0) or 0)} 次",
+                        "Provider 词条执行范围（累计）: "
+                        f"{int(metrics.get('translation_units_total', 0) or 0)} 条",
+                    ]
+                )
+            else:
+                # Older/third-party manifests may still use the historical metric meaning.
+                # Do not silently reinterpret those values as contributing-run evidence.
+                body_lines = [
+                    completed_line,
+                    f"API 调用: {int(metrics.get('requests', 0) or 0)} 次",
+                    f"翻译条数: {int(metrics.get('translation_units_total', 0) or 0)}",
+                ]
             translation_files = int(metrics.get("translation_files_total", 0) or 0)
             if translation_files:
                 # 这是贡献 Provider 执行涉及的资源集合，不宣称是 ZIP/artifact diff。
