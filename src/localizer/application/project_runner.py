@@ -106,6 +106,22 @@ class ProjectRunResult:
     rebuild: Optional[RebuildPlan] = None
 
 
+@dataclass(frozen=True)
+class ResourceQueueItem:
+    """现有 resource worker queue 的轻量排序视图。
+
+    `group` 始终保留完整执行输入；`estimated_work` 只用于 claim 顺序，绝不参与
+    结果索引或 BatchOrchestrator 的 resume 语义。
+    """
+
+    original_index: int
+    group: Tuple[TranslationUnit, ...]
+    relative_path: str
+    estimated_work: int
+    remaining_units: int
+    estimate_kind: str
+
+
 class ProjectRunner:
     def __init__(
         self,
@@ -314,6 +330,63 @@ class ProjectRunner:
             resolved_by_human=resolved_by_human,
         )
 
+    @staticmethod
+    def _ordered_resource_queue(
+        resource_groups: Sequence[
+            Tuple[ResourceBuild, Tuple[TranslationUnit, ...]]
+        ],
+        *,
+        checkpoint: JsonCheckpoint,
+        token_counter,
+    ) -> Tuple[ResourceQueueItem, ...]:
+        """按 remaining source workload 对现有 resource queue 做稳定降序排列。
+
+        这里只建立**排序视图**。已经在 checkpoint 成功的 unit 不参与评分，但
+        `ResourceQueueItem.group` 仍保存原始完整 group，交给 BatchOrchestrator 后
+        继续由它自己的 resume 逻辑复用成功结果。这样调度优化不会改变执行语义。
+        """
+        items = []
+        for original_index, (_resource, group) in enumerate(resource_groups):
+            remaining = tuple(
+                unit
+                for unit in group
+                if checkpoint.succeeded(unit.stable_identity) is None
+            )
+            estimate_kind = "source_tokens"
+            try:
+                estimated_work = sum(
+                    max(0, int(token_counter(unit.source_text)))
+                    for unit in remaining
+                )
+                if remaining and estimated_work <= 0:
+                    estimate_kind = "pending_units"
+                    estimated_work = len(remaining)
+            except Exception:
+                # 排序只是性能 heuristic。计数器异常不能让一轮本可执行的翻译失败；
+                # 真正的 batch planning 仍会沿既有路径使用其自己的 token 判据。
+                estimate_kind = "pending_units"
+                estimated_work = len(remaining)
+            items.append(
+                ResourceQueueItem(
+                    original_index=original_index,
+                    group=group,
+                    relative_path=group[0].relative_path,
+                    estimated_work=estimated_work,
+                    remaining_units=len(remaining),
+                    estimate_kind=estimate_kind,
+                )
+            )
+        return tuple(
+            sorted(
+                items,
+                key=lambda item: (
+                    -item.estimated_work,
+                    item.relative_path,
+                    item.original_index,
+                ),
+            )
+        )
+
     def run(
         self,
         *,
@@ -446,9 +519,14 @@ class ProjectRunner:
                 worker_count = min(
                     self.config.provider.concurrency, len(resource_groups)
                 )
+                ordered_queue = self._ordered_resource_queue(
+                    resource_groups,
+                    checkpoint=checkpoint,
+                    token_counter=token_counter,
+                )
                 work_queue: Queue[Tuple[int, Tuple]] = Queue()
-                for index, (_resource, group) in enumerate(resource_groups):
-                    work_queue.put((index, group))
+                for item in ordered_queue:
+                    work_queue.put((item.original_index, item.group))
                 composer = PromptComposer(prompt, background, glossary)
 
                 def translate_worker(worker_index: int):
