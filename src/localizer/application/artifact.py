@@ -291,8 +291,12 @@ class ArtifactBuilder:
                 f"发布完成于 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
                 f"API 调用: {int(metrics.get('requests', 0) or 0)} 次",
                 f"翻译条数: {int(metrics.get('translation_units_total', 0) or 0)}",
-                f"消耗 token: {total_tokens}",
             ]
+            translation_files = int(metrics.get("translation_files_total", 0) or 0)
+            if translation_files:
+                # 这是贡献 Provider 执行涉及的资源集合，不宣称是 ZIP/artifact diff。
+                body_lines.append(f"涉及翻译资源: {translation_files} 个")
+            body_lines.append(f"消耗 token: {total_tokens}")
             # 批次概览与增量谱系（M6）。此前说明里只有三个总量，回答不了
             # 「这轮有没有缩过批」和「这个包基于哪几轮的钱」——2026-08-04
             # 那次 97/98 个失败全部来自一个 97 词条批次撞读超时，而发布说明
