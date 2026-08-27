@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
@@ -157,6 +157,7 @@ class SQLiteTranslationMemory:
     def upsert(self, entry: TMEntry) -> None:
         now = datetime.now(timezone.utc).isoformat()
         with self.transaction() as connection:
+            self._archive_replaced_formal(connection, entry, now)
             connection.execute(self._UPSERT_SQL, self._values(entry, now))
 
     def upsert_many(self, entries: Sequence[TMEntry]) -> Tuple[str, ...]:
@@ -177,6 +178,8 @@ class SQLiteTranslationMemory:
         before = self.rows_for([entry.stable_identity for entry in entries])
         now = datetime.now(timezone.utc).isoformat()
         with self.transaction() as connection:
+            for entry in entries:
+                self._archive_replaced_formal(connection, entry, now)
             connection.executemany(
                 self._UPSERT_SQL,
                 [self._values(entry, now) for entry in entries],
@@ -218,15 +221,23 @@ class SQLiteTranslationMemory:
         return found
 
     def stale_formal_identities(self, entries: Sequence[TMEntry]) -> Tuple[str, ...]:
-        """现有行已是 formal，但源文指纹与本次不符 —— 写入必被 WHERE 挡下。"""
+        """现有 formal 与本次源文不同，且没有可精确复用的历史版本。"""
         existing = self.rows_for([entry.stable_identity for entry in entries])
         stale = []
         for entry in entries:
             row = existing.get(entry.stable_identity)
             if row is None or not row["is_formal"] or entry.is_formal:
                 continue
-            if row["source_fingerprint"] != entry.source_fingerprint:
-                stale.append(entry.stable_identity)
+            if row["source_fingerprint"] == entry.source_fingerprint:
+                continue
+            # 多源/多版本会在同一 stable coordinate 上往返。若这个源文指纹以前
+            # 已经作为 formal 存在过，Planner 会从 coordinate_history 精确命中，
+            # 不会产生写入，因此当前另一分支的 formal 也不会形成写入阻塞。
+            if self._lookup_history(
+                entry.stable_identity, entry.source_fingerprint
+            ) is not None:
+                continue
+            stale.append(entry.stable_identity)
         return tuple(stale)
 
     def apply_human_review(
@@ -281,6 +292,8 @@ class SQLiteTranslationMemory:
 
         now = datetime.now(timezone.utc).isoformat()
         with self.transaction() as connection:
+            for entry in writable:
+                self._archive_replaced_formal(connection, entry, now)
             connection.executemany(
                 self._UPSERT_SQL, [self._values(entry, now) for entry in writable]
             )
@@ -349,6 +362,9 @@ class SQLiteTranslationMemory:
         改 legacy 影子行会被 `replace_legacy_shadow` 的整段 DELETE 重建抹掉，
         还会把它踢出 `legacy_source_candidates`，从而改变同源收敛的多数派统计、
         波及一批与本次决策毫无关系的坐标。
+
+        这里也**不归档到 source history**：人工明确退休意味着这条译文不能再被
+        自动复用；若把它归档，下一次相同源文反而会从历史层把它复活。
         """
         keys = [str(value) for value in identities if value]
         if not keys:
@@ -368,10 +384,14 @@ class SQLiteTranslationMemory:
         *,
         expected_identities: Optional[Sequence[str]] = None,
     ) -> int:
-        """删除源文指纹已经变化的 formal 行，让当前资源重新接管这些坐标。
+        """归档并删除源文指纹已变化的 formal，让当前资源接管坐标。
 
         调用方必须先向操作者展示候选并取得明确确认。删除条件在同一事务里
         重新校验 ``is_formal`` 和旧指纹，避免预览后 TM 发生变化时误删新结果。
+
+        旧 formal 会按 ``(stable_identity, source_fingerprint)`` 保存到精确历史层。
+        这样正式服/测试服或其他并行源在同一坐标上往返时，回到旧源文可以直接
+        命中当时已经验证过的译文，而不是把“最后执行的源”误当成唯一基线。
         """
         candidates = {
             entry.stable_identity: entry.source_fingerprint
@@ -381,8 +401,17 @@ class SQLiteTranslationMemory:
         if not candidates:
             return 0
         removed = 0
+        now = datetime.now(timezone.utc).isoformat()
         with self.transaction() as connection:
             for identity, current_fingerprint in candidates.items():
+                row = connection.execute(
+                    "SELECT * FROM tm_entries WHERE stable_identity = ? "
+                    "AND is_formal = 1 AND source_fingerprint <> ?",
+                    (identity, current_fingerprint),
+                ).fetchone()
+                if row is None:
+                    continue
+                self._archive_formal_row(connection, row, now)
                 cursor = connection.execute(
                     "DELETE FROM tm_entries "
                     "WHERE stable_identity = ? AND is_formal = 1 "
@@ -525,33 +554,58 @@ class SQLiteTranslationMemory:
         row = self.connection.execute(
             "SELECT * FROM tm_entries WHERE stable_identity = ?", (stable_identity,)
         ).fetchone()
-        if row is None:
-            return None
-        if source_fingerprint is not None and row["source_fingerprint"] != source_fingerprint:
-            return None
-        if not row["translation"] or row["quality_state"] == "failed":
-            return None
-        if not row["is_formal"]:
-            if not allow_shadow or row["classification"] != "legacy_clean":
+        if row is not None and (
+            source_fingerprint is None
+            or row["source_fingerprint"] == source_fingerprint
+        ):
+            # 当前行与请求的源文一致时，沿用原来的 fail-closed 判据。特别是当前
+            # 行已经 failed/quarantined 时，不能因为历史里恰好有同 fingerprint
+            # 的旧好结果就绕过当前治理状态。
+            if not row["translation"] or row["quality_state"] == "failed":
                 return None
-        if row["review_state"] in {"suspect", "quarantined"}:
-            return None
-        return self._from_row(row)
+            if not row["is_formal"]:
+                if not allow_shadow or row["classification"] != "legacy_clean":
+                    return None
+            if row["review_state"] in {"suspect", "quarantined"}:
+                return None
+            return self._from_row(row)
+
+        # stable coordinate 的当前行属于另一条源分支时，允许按 source fingerprint
+        # 精确回到已经退休的 formal。这里不是“取上一版”或“取最新历史”，因此执行
+        # 顺序不会改变结果：只有同坐标 + 同源文指纹才能命中。
+        if source_fingerprint is not None:
+            return self._lookup_history(stable_identity, source_fingerprint)
+        return None
 
     def lookup_reviewed_source(
         self, project_id: str, source_fingerprint: str
     ) -> Optional[TMEntry]:
-        rows = self.connection.execute(
-            """SELECT * FROM tm_entries
-               WHERE project_id = ? AND source_fingerprint = ?
-                 AND is_formal = 1 AND quality_state = 'passed'
-                 AND translation != ''
-                 AND review_state IN ('checked', 'reviewed', 'locked')
-               ORDER BY CASE review_state
-                    WHEN 'locked' THEN 3 WHEN 'reviewed' THEN 2 ELSE 1 END DESC,
-                    updated_at DESC""",
-            (project_id, source_fingerprint),
-        ).fetchall()
+        rows = list(
+            self.connection.execute(
+                """SELECT * FROM tm_entries
+                   WHERE project_id = ? AND source_fingerprint = ?
+                     AND is_formal = 1 AND quality_state = 'passed'
+                     AND translation != ''
+                     AND review_state IN ('checked', 'reviewed', 'locked')
+                   ORDER BY CASE review_state
+                        WHEN 'locked' THEN 3 WHEN 'reviewed' THEN 2 ELSE 1 END DESC,
+                        updated_at DESC""",
+                (project_id, source_fingerprint),
+            ).fetchall()
+        )
+        if self._history_table_exists():
+            rows.extend(
+                self.connection.execute(
+                    """SELECT * FROM tm_source_history
+                       WHERE project_id = ? AND source_fingerprint = ?
+                         AND quality_state = 'passed' AND translation != ''
+                         AND review_state IN ('checked', 'reviewed', 'locked')
+                       ORDER BY CASE review_state
+                            WHEN 'locked' THEN 3 WHEN 'reviewed' THEN 2 ELSE 1 END DESC,
+                            archived_at DESC""",
+                    (project_id, source_fingerprint),
+                ).fetchall()
+            )
         if not rows:
             return None
         translations = {row["translation"] for row in rows}
@@ -885,6 +939,107 @@ class SQLiteTranslationMemory:
         ).fetchall()
         return {row["classification"]: row["count"] for row in rows}
 
+    def _history_table_exists(self) -> bool:
+        return bool(
+            self.connection.execute(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type = 'table' AND name = 'tm_source_history'"
+            ).fetchone()
+        )
+
+    def _lookup_history(
+        self, stable_identity: str, source_fingerprint: str
+    ) -> Optional[TMEntry]:
+        if not self._history_table_exists():
+            # 旧 schema_version=2 数据库在第一次写打开之前没有这个 additive 表；
+            # read-only preflight 仍然应可运行，只是没有尚未产生过的历史可复用。
+            return None
+        row = self.connection.execute(
+            """SELECT * FROM tm_source_history
+               WHERE stable_identity = ? AND source_fingerprint = ?""",
+            (stable_identity, source_fingerprint),
+        ).fetchone()
+        if row is None or not row["translation"] or row["quality_state"] == "failed":
+            return None
+        if row["review_state"] in {"suspect", "quarantined"}:
+            return None
+        return replace(
+            self._from_row(row), match_scope="coordinate_history", is_formal=True
+        )
+
+    def _archive_replaced_formal(
+        self, connection: sqlite3.Connection, entry: TMEntry, archived_at: str
+    ) -> None:
+        """显式 formal 覆盖也必须保住旧 source 版本；被保护的非 formal 写不归档。"""
+        if not entry.is_formal:
+            return
+        row = connection.execute(
+            "SELECT * FROM tm_entries WHERE stable_identity = ? AND is_formal = 1",
+            (entry.stable_identity,),
+        ).fetchone()
+        if row is None or row["source_fingerprint"] == entry.source_fingerprint:
+            return
+        self._archive_formal_row(connection, row, archived_at)
+
+    @staticmethod
+    def _archive_formal_row(
+        connection: sqlite3.Connection, row: sqlite3.Row, archived_at: str
+    ) -> None:
+        connection.execute(
+            """INSERT INTO tm_source_history (
+                    stable_identity, project_id, adapter_id, relative_path, logical_key,
+                    source_text, source_fingerprint, translation, origin, review_state,
+                    match_scope, classification, stage, run_id, model, prompt_hash,
+                    rules_revision, glossary_revision, quality_state, is_formal,
+                    human_authored, archived_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(stable_identity, source_fingerprint) DO UPDATE SET
+                    project_id=excluded.project_id,
+                    adapter_id=excluded.adapter_id,
+                    relative_path=excluded.relative_path,
+                    logical_key=excluded.logical_key,
+                    source_text=excluded.source_text,
+                    translation=excluded.translation,
+                    origin=excluded.origin,
+                    review_state=excluded.review_state,
+                    match_scope=excluded.match_scope,
+                    classification=excluded.classification,
+                    stage=excluded.stage,
+                    run_id=excluded.run_id,
+                    model=excluded.model,
+                    prompt_hash=excluded.prompt_hash,
+                    rules_revision=excluded.rules_revision,
+                    glossary_revision=excluded.glossary_revision,
+                    quality_state=excluded.quality_state,
+                    is_formal=excluded.is_formal,
+                    human_authored=excluded.human_authored,
+                    archived_at=excluded.archived_at""",
+            (
+                row["stable_identity"],
+                row["project_id"],
+                row["adapter_id"],
+                row["relative_path"],
+                row["logical_key"],
+                row["source_text"],
+                row["source_fingerprint"],
+                row["translation"],
+                row["origin"],
+                row["review_state"],
+                row["match_scope"],
+                row["classification"],
+                row["stage"],
+                row["run_id"],
+                row["model"],
+                row["prompt_hash"],
+                row["rules_revision"],
+                row["glossary_revision"],
+                row["quality_state"],
+                row["is_formal"],
+                row["human_authored"],
+                archived_at,
+            ),
+        )
+
     def _initialize(self) -> None:
         with self.connection:
             self.connection.executescript(
@@ -921,6 +1076,33 @@ class SQLiteTranslationMemory:
                 CREATE INDEX IF NOT EXISTS idx_tm_source
                     ON tm_entries(project_id, source_fingerprint, review_state, is_formal);
                 CREATE INDEX IF NOT EXISTS idx_tm_run ON tm_entries(run_id, quality_state);
+                CREATE TABLE IF NOT EXISTS tm_source_history (
+                    stable_identity TEXT NOT NULL,
+                    project_id TEXT NOT NULL,
+                    adapter_id TEXT NOT NULL,
+                    relative_path TEXT NOT NULL,
+                    logical_key TEXT NOT NULL,
+                    source_text TEXT NOT NULL,
+                    source_fingerprint TEXT NOT NULL,
+                    translation TEXT NOT NULL,
+                    origin TEXT NOT NULL,
+                    review_state TEXT NOT NULL,
+                    match_scope TEXT NOT NULL,
+                    classification TEXT NOT NULL,
+                    stage INTEGER,
+                    run_id TEXT,
+                    model TEXT,
+                    prompt_hash TEXT,
+                    rules_revision TEXT,
+                    glossary_revision TEXT,
+                    quality_state TEXT NOT NULL,
+                    is_formal INTEGER NOT NULL DEFAULT 1,
+                    human_authored INTEGER NOT NULL DEFAULT 0,
+                    archived_at TEXT NOT NULL,
+                    PRIMARY KEY (stable_identity, source_fingerprint)
+                );
+                CREATE INDEX IF NOT EXISTS idx_tm_source_history
+                    ON tm_source_history(project_id, source_fingerprint);
                 CREATE TABLE IF NOT EXISTS legacy_sync (
                     source_path TEXT PRIMARY KEY,
                     source_hash TEXT NOT NULL,
