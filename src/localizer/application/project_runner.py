@@ -34,6 +34,11 @@ from localizer.application.quality_gate import (
     QualityGate,
 )
 from localizer.application.scan import ResourceScanner
+from localizer.application.translation_evidence import (
+    TranslationEvidenceStore,
+    aggregate_execution_metrics,
+    normalize_execution_record,
+)
 from localizer.application.translation_plan import TranslationPlan, TranslationPlanner
 from localizer.config.models import ProjectConfig
 from localizer.infrastructure.atomic_io import AtomicIO
@@ -350,6 +355,8 @@ class ProjectRunner:
                 for unit in pending
                 if unit.stable_identity not in rebuild.reused
             ]
+        provider_scope_units = len(pending)
+        provider_scope_files = tuple(sorted({unit.relative_path for unit in pending}))
         tm_hits = active_plan.tm_hits
         token_counter = self.prepare_translation_runtime() if pending else None
 
@@ -570,6 +577,60 @@ class ProjectRunner:
                         rejected,
                     )
 
+            lineage = self._run_lineage(rebuild.parent_run_id) if rebuild else ()
+            current_metrics = (
+                dict(checkpoint.metrics)
+                if checkpoint
+                else {
+                    "requests": 0,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "translation_units_total": 0,
+                    "translation_files_total": 0,
+                }
+            )
+            current_record = normalize_execution_record(
+                run_id,
+                {
+                    **current_metrics,
+                    "translation_units_total": (
+                        provider_scope_units if int(current_metrics.get("requests", 0) or 0) else 0
+                    ),
+                    "translation_files_total": (
+                        len(provider_scope_files)
+                        if int(current_metrics.get("requests", 0) or 0)
+                        else 0
+                    ),
+                },
+                translation_files=(
+                    provider_scope_files
+                    if int(current_metrics.get("requests", 0) or 0)
+                    else ()
+                ),
+            )
+            current_run_metrics = {
+                key: value for key, value in current_record.items() if key != "run_id"
+            }
+            evidence_store = TranslationEvidenceStore(
+                self.config.paths.workspace / "runs"
+            )
+            inherited_evidence = (
+                evidence_store.inherited_for_rebuild(
+                    parent_run_id=rebuild.parent_run_id,
+                    reuse_checkpoint_run_id=rebuild.reuse_checkpoint_run_id,
+                    lineage=lineage,
+                    reused_count=len(rebuild.reused),
+                )
+                if rebuild
+                else ()
+            )
+            evidence_records = list(inherited_evidence)
+            if current_record["requests"] > 0:
+                evidence_records.append(current_record)
+            if checkpoint is not None or evidence_records:
+                evidence_records = list(evidence_store.save(run_id, evidence_records))
+            aggregate_metrics = aggregate_execution_metrics(evidence_records)
+
             build = LocalBuildPipeline(
                 validation_rule=validation_rule,
                 glossary_terms=glossary_terms,
@@ -593,12 +654,13 @@ class ProjectRunner:
                 formal_tm_identities=machine_success_ids,
                 manifest_metadata={
                     **self._manifest_metadata(resources, tm),
-                    "translation_metrics": dict(checkpoint.metrics) if checkpoint else {
-                        "requests": 0,
-                        "input_tokens": 0,
-                        "output_tokens": 0,
-                        "translation_units_total": 0,
-                    },
+                    # Backward-compatible public summary: requests/tokens now describe the
+                    # deduplicated Provider executions that actually contribute translations
+                    # to this release lineage, not merely the zero-work child run.
+                    "translation_metrics": aggregate_metrics,
+                    "translation_metrics_current_run": current_run_metrics,
+                    "translation_evidence_runs": evidence_records,
+                    "translation_metrics_scope": "contributing_run_execution",
                     # 这一轮批次是怎么跑的。metrics 只有总量，回答不了
                     # 「为什么贵」和「有没有缩过批」。
                     "batch_summary": (
@@ -611,9 +673,7 @@ class ProjectRunner:
                         {
                             "rebuild": {
                                 **rebuild.as_dict(),
-                                "lineage": list(
-                                    self._run_lineage(rebuild.parent_run_id)
-                                ),
+                                "lineage": list(lineage),
                             }
                         }
                         if rebuild
