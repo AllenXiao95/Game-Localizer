@@ -589,28 +589,23 @@ class ProjectRunner:
                     "translation_files_total": 0,
                 }
             )
+            has_current_provider_work = int(current_metrics.get("requests", 0) or 0) > 0
+            current_run_metrics = dict(current_metrics)
+            current_run_metrics["translation_units_total"] = (
+                provider_scope_units if has_current_provider_work else 0
+            )
+            current_run_metrics["translation_files_total"] = (
+                len(provider_scope_files) if has_current_provider_work else 0
+            )
+            if has_current_provider_work and provider_scope_files:
+                current_run_metrics["translation_files"] = list(provider_scope_files)
             current_record = normalize_execution_record(
                 run_id,
-                {
-                    **current_metrics,
-                    "translation_units_total": (
-                        provider_scope_units if int(current_metrics.get("requests", 0) or 0) else 0
-                    ),
-                    "translation_files_total": (
-                        len(provider_scope_files)
-                        if int(current_metrics.get("requests", 0) or 0)
-                        else 0
-                    ),
-                },
+                current_run_metrics,
                 translation_files=(
-                    provider_scope_files
-                    if int(current_metrics.get("requests", 0) or 0)
-                    else ()
+                    provider_scope_files if has_current_provider_work else ()
                 ),
             )
-            current_run_metrics = {
-                key: value for key, value in current_record.items() if key != "run_id"
-            }
             evidence_store = TranslationEvidenceStore(
                 self.config.paths.workspace / "runs"
             )
@@ -630,6 +625,10 @@ class ProjectRunner:
             if checkpoint is not None or evidence_records:
                 evidence_records = list(evidence_store.save(run_id, evidence_records))
             aggregate_metrics = aggregate_execution_metrics(evidence_records)
+            # Preserve checkpoint-only operational fields (`completed_files`, degraded-write
+            # diagnostics, etc.) for existing consumers while replacing the public execution
+            # counters with the deduplicated contributing-run values.
+            public_metrics = {**current_metrics, **aggregate_metrics}
 
             build = LocalBuildPipeline(
                 validation_rule=validation_rule,
@@ -657,7 +656,7 @@ class ProjectRunner:
                     # Backward-compatible public summary: requests/tokens now describe the
                     # deduplicated Provider executions that actually contribute translations
                     # to this release lineage, not merely the zero-work child run.
-                    "translation_metrics": aggregate_metrics,
+                    "translation_metrics": public_metrics,
                     "translation_metrics_current_run": current_run_metrics,
                     "translation_evidence_runs": evidence_records,
                     "translation_metrics_scope": "contributing_run_execution",
