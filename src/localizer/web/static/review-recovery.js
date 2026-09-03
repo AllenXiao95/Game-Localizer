@@ -1,9 +1,8 @@
-/* Review recovery extension.
+/* Review extension: recovery + same-source safety preview.
  *
- * The main dashboard intentionally stays dependency-free and self-contained.  The
- * HTTP server inlines this repo-owned extension after index.html so the existing
- * Review globals/functions remain the single UI shell instead of creating a second
- * dashboard page.
+ * The main dashboard intentionally stays dependency-free and self-contained. The
+ * HTTP server already inlines this repo-owned extension after index.html, so keep
+ * the Prevention preview here instead of adding another runtime asset/wrapper.
  */
 (() => {
   const originalReviewShell = reviewShell;
@@ -23,13 +22,65 @@
 
   const originalSelectReviewRow = selectReviewRow;
   selectReviewRow = async function selectReviewRowWithRecovery(index) {
-    if (review.view !== "recovery") return originalSelectReviewRow(index);
-    review.selected = index;
-    document.querySelectorAll("#reviewQueue .qitem").forEach((el) =>
-      el.setAttribute("aria-selected", String(Number(el.dataset.idx) === index)));
-    const operation = review.rows[index];
-    if (operation) renderRecoveryDetail(operation);
+    if (review.view === "recovery") {
+      review.selected = index;
+      document.querySelectorAll("#reviewQueue .qitem").forEach((el) =>
+        el.setAttribute("aria-selected", String(Number(el.dataset.idx) === index)));
+      const operation = review.rows[index];
+      if (operation) renderRecoveryDetail(operation);
+      return;
+    }
+    await originalSelectReviewRow(index);
+    if (review.view === "groups") renderSameSourcePreview(review.rows[index]);
   };
+
+  function previewText(value, emptyLabel = "（空译文）") {
+    return value === null || value === undefined || value === ""
+      ? `<span class="muted">${esc(emptyLabel)}</span>`
+      : `<span class="visible-text">${visibleBreaks(String(value))}</span>`;
+  }
+
+  function authorityChip(member) {
+    if (member.review_human_committed) {
+      return '<span class="chip warn">Review 人工定稿</span>';
+    }
+    if (member.human_committed) {
+      return `<span class="chip warn">${esc(member.current_origin || "human")} · 人工权威</span>`;
+    }
+    if (member.current_from_tm) {
+      const state = member.current_review_state ? ` · ${esc(member.current_review_state)}` : "";
+      return `<span class="chip">TM · ${esc(member.current_origin || "unknown")}${state}</span>`;
+    }
+    return `<span class="chip">本次 run · ${esc(member.current_origin || "unknown")}</span>`;
+  }
+
+  function renderSameSourcePreview(group) {
+    const detail = $("reviewDetail");
+    if (!detail || !group) return;
+    const members = group.members || [];
+    const humanCount = Number(group.human_committed_members || 0);
+    const distribution = (group.current_variants || group.variants || [])
+      .map((item) => `${esc(item.translation || "（空）")} ×${num(item.count)}`)
+      .join(" · ") || "—";
+    detail.insertAdjacentHTML("afterbegin", `
+      <div class="note" style="border-color:${humanCount ? "var(--warn)" : "var(--border)"};margin:0 0 10px">
+        <b>统一前坐标预览</b>：唯一最高频只代表当前分布，<b>不代表语义正确</b>。
+        请先检查路径、键、context 与当前 authority；已有不同人工定稿时，服务端会 fail-closed，
+        不允许普通批量统一静默覆盖。<br>
+        当前分布：${distribution}${humanCount ? ` · <b>${num(humanCount)} 条人工权威</b>` : ""}
+      </div>
+      <div class="scroll short"><table><thead><tr>
+        <th>资源 / 键</th><th>context</th><th>本次 run</th><th>当前译文</th><th>authority</th>
+      </tr></thead><tbody>
+        ${members.map((member) => `<tr>
+          <td class="mono">${esc(member.relative_path || "—")}<br>${esc(member.logical_key || member.stable_identity)}</td>
+          <td>${member.context ? esc(member.context) : '<span class="muted">—</span>'}</td>
+          <td>${previewText(member.run_translation ?? member.translation)}</td>
+          <td>${previewText(member.current_translation)}</td>
+          <td>${authorityChip(member)}</td>
+        </tr>`).join("")}
+      </tbody></table></div>`);
+  }
 
   async function loadRecoveryQueue() {
     const box = $("reviewQueue");
