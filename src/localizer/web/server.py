@@ -1,16 +1,20 @@
 """Public dashboard server facade with fail-closed Review UI delivery.
 
-The main implementation lives in ``server_impl``.  Keeping the public module as a
+The main implementation lives in ``server_impl``. Keeping the public module as a
 small facade lets Review UI extensions be mandatory without rewriting the large
-HTTP server in one shot.  If a required asset is missing, ``/`` fails loudly
+HTTP server in one shot. If a required asset is missing, ``/`` fails loudly
 instead of silently serving a dashboard with a function area absent.
 """
 from __future__ import annotations
 
 from . import server_impl as _impl
+from .project_history_detail import (
+    project_history_coordinates,
+    safe_revert_with_history_fallback,
+)
 from .review_recovery import project_change_history
 
-# Preserve the public/private surface of the historical module.  A few tests and
+# Preserve the public/private surface of the historical module. A few tests and
 # internal callers import underscore names (for example ``_DRAIN_MARGIN``), so this
 # is intentionally broader than ``from ... import *``.
 for _name in dir(_impl):
@@ -67,11 +71,12 @@ def _static_with_required_recovery(self, name: str, content_type: str) -> None:
 
 
 _original_dispatch = _impl._Handler._dispatch
+_original_review_post = _impl._Handler._review_post
 
 
 def _dispatch_with_project_history(self, route: str, params: dict) -> None:
-    """Expose project-wide Review history without changing run-scoped Review APIs."""
-    if route != "/api/review/history":
+    """Expose project-wide Review history and paged coordinate inspection."""
+    if route not in {"/api/review/history", "/api/review/history/coordinates"}:
         _original_dispatch(self, route, params)
         return
 
@@ -81,23 +86,58 @@ def _dispatch_with_project_history(self, route: str, params: dict) -> None:
             {"available": False, "reason": "审查视图只在回环地址上启用"},
         )
         return
+    if route == "/api/review/history":
+        self._json(
+            project_change_history(
+                service,
+                action=self._single(params, "action") or "all",
+                status=self._single(params, "status") or "all",
+                run_id=self._single(params, "run_id") or "",
+                query=self._single(params, "q") or "",
+                limit=self._int(params, "limit", 100),
+                offset=self._int(params, "offset", 0),
+            )
+        )
+        return
     self._json(
-        project_change_history(
+        project_history_coordinates(
             service,
-            action=self._single(params, "action") or "all",
-            status=self._single(params, "status") or "all",
             run_id=self._single(params, "run_id") or "",
+            action=self._single(params, "action") or "",
+            audit_id=self._single(params, "audit_id") or "",
             query=self._single(params, "q") or "",
+            status=self._single(params, "status") or "all",
+            recovery=self._single(params, "recovery") or "all",
             limit=self._int(params, "limit", 100),
             offset=self._int(params, "offset", 0),
         )
     )
 
 
+def _review_post_with_historical_recovery(self, route: str, payload: dict) -> None:
+    if route != "/api/review/revert":
+        _original_review_post(self, route, payload)
+        return
+    service = self.review
+    if service is None:
+        self._method_not_allowed()
+        return
+    self._json(
+        safe_revert_with_history_fallback(
+            service,
+            str(payload.get("run_id", "")),
+            list(payload.get("decision_ids") or []),
+            reason=str(payload.get("reason", "")),
+            expected_log_revision=payload.get("expected_log_revision"),
+        )
+    )
+
+
 # DashboardServer builds the request handler from the class object defined in the
-# implementation module.  Patch that exact class so every public entrypoint
-# (console script, ``python -m``, tests) uses mandatory Review asset delivery and
-# the project-level Review history facade.
+# implementation module. Patch that exact class so every public entrypoint
+# (console script, ``python -m``, tests) uses mandatory Review asset delivery,
+# project-level history, and the same fail-closed revert route for old runs.
 _impl._Handler._static = _static_with_required_recovery
 _impl._Handler._dispatch = _dispatch_with_project_history
+_impl._Handler._review_post = _review_post_with_historical_recovery
 _Handler = _impl._Handler
