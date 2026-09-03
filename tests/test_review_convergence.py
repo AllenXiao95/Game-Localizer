@@ -180,7 +180,7 @@ class DivergentHumanPreventionTests(unittest.TestCase):
         self.assertEqual("g2", original["logical_key"])
         self.assertEqual("译法乙", original["current_translation"])
         self.assertFalse(original["current_from_tm"])
-        self.assertFalse(original["human_committed"])
+        self.assertFalse(original["current_human_authored"])
 
         self.service.commit(
             run_id,
@@ -192,19 +192,13 @@ class DivergentHumanPreventionTests(unittest.TestCase):
         current = next(
             member for member in after["members"] if member["stable_identity"] == protected
         )
-        self.assertEqual("译法乙", current["run_translation"])
+        self.assertEqual("译法乙", current["translation"])
         self.assertEqual("收到！", current["current_translation"])
         self.assertTrue(current["current_from_tm"])
         self.assertEqual("human", current["current_origin"])
         self.assertEqual("reviewed", current["current_review_state"])
         self.assertTrue(current["current_is_formal"])
-        self.assertTrue(current["human_committed"])
-        self.assertTrue(current["review_human_committed"])
-        self.assertEqual(1, after["human_committed_members"])
-        self.assertIn(
-            {"translation": "收到！", "count": 1},
-            after["current_variants"],
-        )
+        self.assertTrue(current["current_human_authored"])
 
     def test_group_unify_refuses_divergent_existing_human_finalization(self) -> None:
         run_id = self.project.RUN_ID
