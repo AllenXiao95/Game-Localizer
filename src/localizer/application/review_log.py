@@ -20,6 +20,8 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
+# v1 的 JSON 形状允许新增有默认值的字段。旧事件没有 `after` 时仍按空映射读取，
+# 因此这次只是向后兼容扩展，不需要把既有月分片整体迁移到 v2。
 SCHEMA_VERSION = 1
 
 # 决策事件的动作。draft 不写 TM，只进 ledger；其余都对应一次 TM 写入或术语变更。
@@ -53,6 +55,10 @@ class ReviewDecisionEvent:
     # 完整前像：{stable_identity: 行的全部列 或 None（当时不存在）}。
     # 只存「改了什么」是不够的 —— 撤销要能把行还原成一模一样。
     before: Mapping[str, Optional[Mapping[str, Any]]] = field(default_factory=dict)
+    # 新事件同时记录完整后像。Recovery 的 freshness 判据优先直接比较
+    # `current == after`；旧事件没有该字段时才退回 ReviewIndex / before-image
+    # compatibility proof。它不改变 TM 的 authority：日志仍是权威，TM 仍是投影。
+    after: Mapping[str, Optional[Mapping[str, Any]]] = field(default_factory=dict)
     details: Mapping[str, Any] = field(default_factory=dict)
     actor: Mapping[str, str] = field(default_factory=dict)
     decision_id: str = ""
@@ -85,6 +91,8 @@ class ReviewDecisionEvent:
                 f"supported: {SCHEMA_VERSION}"
             )
         data["targets"] = tuple(data.get("targets") or ())
+        # 2026-09-03 之前的 v1 事件没有 after；保持原日志可直接读取。
+        data.setdefault("after", {})
         return cls(**data)
 
 
