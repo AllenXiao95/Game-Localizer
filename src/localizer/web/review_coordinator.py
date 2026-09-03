@@ -10,8 +10,8 @@ snapshot under one process-local lock:
 2. newly appended TM-mutation decisions carry a complete ``after`` row snapshot;
 3. same-source ``unify`` fails closed before overwriting an existing divergent
    Review-owned human finalization;
-4. same-source Review reads surface current TM/authority evidence for the operator
-   without making the preview payload part of mutation semantics.
+4. same-source Review reads expose current TM rows for operator preview without
+   making preview state part of mutation semantics.
 
 It deliberately does not add a second audit store, override workflow, or duplicate
 commit/unify implementations. Old ReviewService callers remain compatible;
@@ -115,24 +115,8 @@ class CoordinatedReviewService(ReviewService):
                 return False
         return True
 
-    @staticmethod
-    def _preview_variants(members):
-        counts = {}
-        for member in members:
-            text = str(member.get("current_translation") or "")
-            counts[text] = counts.get(text, 0) + 1
-        return [
-            {"translation": text, "count": count}
-            for text, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
-        ]
-
     def groups(self, run_id: str, **kwargs):
-        """Decorate same-source groups with current coordinate/authority evidence.
-
-        The immutable ReviewIndex remains the run snapshot.  This read projection
-        overlays the *current* TM row so the operator sees what a bulk unify would
-        touch now.  None of these fields are accepted back by the write API.
-        """
+        """Overlay current TM fields onto immutable same-source group members."""
         payload = super().groups(run_id, **kwargs)
         groups = list(payload.get("groups") or ())
         identities = [
@@ -144,7 +128,6 @@ class CoordinatedReviewService(ReviewService):
         if not identities:
             return payload
 
-        index = self.index(run_id)
         with SQLiteTranslationMemory(self.config.tm.database, read_only=True) as tm:
             current = tm.rows_for(identities)
 
@@ -153,62 +136,27 @@ class CoordinatedReviewService(ReviewService):
             members = []
             for raw in group.get("members") or ():
                 member = dict(raw)
-                identity = str(member.get("stable_identity") or "")
-                unit = index.units.get(identity) or {}
-                row = current.get(identity)
-                run_translation = str(member.get("translation") or "")
-                current_translation = (
-                    str(row.get("translation") or "") if row is not None else run_translation
-                )
-                human_committed = bool(
-                    row
-                    and row.get("human_authored")
-                    and (
-                        row.get("is_formal")
-                        or row.get("review_state") in {"reviewed", "locked"}
-                    )
-                )
-                review_human_committed = bool(
-                    row
-                    and row.get("origin") == "human"
-                    and row.get("review_state") == "reviewed"
-                    and bool(row.get("is_formal"))
-                )
+                row = current.get(member.get("stable_identity"))
                 member.update(
                     {
-                        "logical_key": member.get("logical_key")
-                        or unit.get("logical_key")
-                        or "",
-                        "context": member.get("context")
-                        if "context" in member
-                        else unit.get("context"),
-                        "run_translation": run_translation,
-                        "current_translation": current_translation,
-                        "current_from_tm": row is not None,
-                        "current_origin": (
-                            str(row.get("origin") or "")
+                        "current_translation": (
+                            str(row.get("translation") or "")
                             if row is not None
-                            else str(unit.get("provenance") or "run")
+                            else str(member.get("translation") or "")
                         ),
+                        "current_from_tm": row is not None,
+                        "current_origin": str(row.get("origin") or "") if row else "",
                         "current_review_state": (
-                            str(row.get("review_state") or "") if row is not None else ""
+                            str(row.get("review_state") or "") if row else ""
                         ),
                         "current_is_formal": bool(row.get("is_formal")) if row else False,
-                        "human_committed": human_committed,
-                        "review_human_committed": review_human_committed,
+                        "current_human_authored": (
+                            bool(row.get("human_authored")) if row else False
+                        ),
                     }
                 )
                 members.append(member)
-            decorated.append(
-                {
-                    **group,
-                    "members": members,
-                    "current_variants": self._preview_variants(members),
-                    "human_committed_members": sum(
-                        1 for member in members if member["human_committed"]
-                    ),
-                }
-            )
+            decorated.append({**group, "members": members})
         return {**payload, "groups": decorated}
 
     def commit(self, run_id: str, edits: Mapping[str, str], **kwargs):
