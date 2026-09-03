@@ -14,12 +14,18 @@ if str(SRC) not in sys.path:
 if str(ROOT / "tests") not in sys.path:
     sys.path.insert(0, str(ROOT / "tests"))
 
+from localizer.adapters.storage.sqlite_tm import SQLiteTranslationMemory
 from localizer.application.review_log import ReviewDecisionEvent
 from localizer.web import DashboardServer as ProductDashboardServer
 from localizer.web.collector import DashboardCollector
 from localizer.web.project_history_detail import project_history_coordinates
+from localizer.web.review import ReviewConflict
 from localizer.web.review_coordinator import CoordinatedReviewService
-from localizer.web.review_recovery import project_change_history, safe_revert
+from localizer.web.review_recovery import (
+    project_change_history,
+    recovery_operations,
+    safe_revert,
+)
 from test_review_recovery import _RecoveryCase
 from test_web_review import _Project
 
@@ -54,22 +60,38 @@ class CoordinatedRecoveryTests(_RecoveryCase):
         )
 
     def test_new_tm_decisions_capture_after_image_and_use_it_without_run_index(self) -> None:
-        identities, outcome, payload, _operation, rows = self._prepare_bad_unify()
-        decision_id = rows[identities["g2"]]["decision_id"]
+        run_id = self.project.RUN_ID
+        group = next(
+            item
+            for item in self.service.groups(run_id)["groups"]
+            if item["source"] == "Общий текст"
+        )
+        outcome = self.service.unify(
+            run_id,
+            group["group_id"],
+            "这就对了！",
+            reason="安全统一用于 after-image 回归",
+        )
+        payload = recovery_operations(self.service, run_id, action="unify")
+        operation = next(
+            item for item in payload["operations"] if item["audit_id"] == outcome.audit_id
+        )
+        row = next(
+            item for item in operation["coordinates"] if item["logical_key"] == "g2"
+        )
+        decision_id = row["decision_id"]
         event = next(
             item for item in self.service._log().read_all()
             if item.decision_id == decision_id
         )
-        self.assertEqual(
-            "这就对了！", event.after[identities["g2"]]["translation"]
-        )
+        self.assertEqual("这就对了！", event.after[row["stable_identity"]]["translation"])
 
-        index_path = self.service._index_path(self.project.RUN_ID)
+        index_path = self.service._index_path(run_id)
         self.assertIsNotNone(index_path)
         index_path.unlink()
         detail = project_history_coordinates(
             self.service,
-            run_id=self.project.RUN_ID,
+            run_id=run_id,
             action="unify",
             audit_id=outcome.audit_id,
             query="b.mo",
@@ -81,7 +103,7 @@ class CoordinatedRecoveryTests(_RecoveryCase):
 
         result = safe_revert(
             self.service,
-            self.project.RUN_ID,
+            run_id,
             [decision_id],
             reason="after-image recovery",
             expected_log_revision=payload["log_revision"],
@@ -122,6 +144,75 @@ class CoordinatedRecoveryTests(_RecoveryCase):
         self.assertFalse(operation["coordinates_inline"])
         self.assertEqual([], operation["coordinates"])
         self.assertIsNone(operation["revertible_count"])
+
+
+class DivergentHumanPreventionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._temp = tempfile.TemporaryDirectory()
+        self.project = _Project(Path(self._temp.name))
+        self.service = CoordinatedReviewService(
+            self.project.config,
+            output_root=self.project.config.paths.output,
+            workspace_root=self.project.config.paths.workspace,
+        )
+
+    def tearDown(self) -> None:
+        self._temp.cleanup()
+
+    def _rows(self, identities):
+        with SQLiteTranslationMemory(self.project.config.tm.database) as tm:
+            return tm.rows_for(list(identities))
+
+    def test_group_unify_refuses_divergent_existing_human_finalization(self) -> None:
+        run_id = self.project.RUN_ID
+        group = next(
+            item
+            for item in self.service.groups(run_id)["groups"]
+            if item["source"] == "Общий текст"
+        )
+        protected = self.project.identity("g2")
+        self.service.commit(
+            run_id,
+            {protected: "收到！"},
+            reason="无线电语境人工定稿",
+        )
+
+        with self.assertRaises(ReviewConflict) as ctx:
+            self.service.unify(
+                run_id,
+                group["group_id"],
+                "这就对了！",
+                reason="不应覆盖语境译法",
+            )
+        self.assertIn("人工定稿", str(ctx.exception))
+        self.assertIn("b.mo:g2", str(ctx.exception))
+
+        identities = [member["stable_identity"] for member in group["members"]]
+        rows = self._rows(identities)
+        self.assertEqual({protected}, set(rows))
+        self.assertEqual("收到！", rows[protected]["translation"])
+        self.assertEqual(1, len(self.service._log().read_all()))
+
+    def test_majority_bulk_refuses_before_any_partial_write(self) -> None:
+        run_id = self.project.RUN_ID
+        protected = self.project.identity("m5")
+        majority_ids = [self.project.identity(f"m{i}") for i in range(1, 6)]
+        self.service.commit(
+            run_id,
+            {protected: "语境译法"},
+            reason="保留上下文差异",
+        )
+
+        with self.assertRaises(ReviewConflict):
+            self.service.unify_majorities(
+                run_id,
+                reason="多数派便利操作必须尊重人工定稿",
+            )
+
+        rows = self._rows(majority_ids)
+        self.assertEqual({protected}, set(rows))
+        self.assertEqual("语境译法", rows[protected]["translation"])
+        self.assertEqual(1, len(self.service._log().read_all()))
 
 
 class DashboardCompositionTests(unittest.TestCase):
