@@ -49,6 +49,19 @@ class ReviewEventCompatibilityTests(unittest.TestCase):
         self.assertEqual({}, event.after)
         self.assertIn('"after": {}', event.to_line())
 
+    def test_intentional_variant_is_a_v1_log_action_not_a_new_store(self) -> None:
+        event = ReviewDecisionEvent(
+            action="intentional_variant",
+            run_id="run-1",
+            targets=("a", "b"),
+            reason="radio acknowledgement uses a different translation",
+            details={"group_id": "group"},
+        )
+        restored = ReviewDecisionEvent.from_payload(json.loads(event.to_line()))
+        self.assertEqual("intentional_variant", restored.action)
+        self.assertEqual(("a", "b"), restored.targets)
+        self.assertEqual("group", restored.details["group_id"])
+
 
 class CoordinatedRecoveryTests(_RecoveryCase):
     def setUp(self) -> None:
@@ -248,6 +261,148 @@ class DivergentHumanPreventionTests(unittest.TestCase):
         self.assertEqual(1, len(self.service._log().read_all()))
 
 
+class IntentionalVariantPreventionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._temp = tempfile.TemporaryDirectory()
+        self.project = _Project(Path(self._temp.name))
+        self.service = CoordinatedReviewService(
+            self.project.config,
+            output_root=self.project.config.paths.output,
+            workspace_root=self.project.config.paths.workspace,
+        )
+
+    def tearDown(self) -> None:
+        self._temp.cleanup()
+
+    def _group(self, run_id=None, source="Общий текст"):
+        return next(
+            item
+            for item in self.service.groups(run_id or self.project.RUN_ID)["groups"]
+            if item["source"] == source
+        )
+
+    def _acknowledge(self, source="Общий текст"):
+        group = self._group(source=source)
+        session = self.service.session(self.project.RUN_ID)
+        result = self.service.mark(
+            self.project.RUN_ID,
+            [
+                {
+                    "target_id": group["group_id"],
+                    "action": "intentional_variant",
+                    "reason": "无线电确认语境允许不同译法",
+                }
+            ],
+            expected_log_revision=session["log_revision"],
+        )
+        return group, result
+
+    def _clone_index(self, run_id: str, *, add_member: bool = False) -> Path:
+        source = self.service._index_path(self.project.RUN_ID)
+        self.assertIsNotNone(source)
+        payload = json.loads(source.read_text(encoding="utf-8"))
+        if add_member:
+            group = next(
+                item for item in payload["same_source_groups"]
+                if item["source"] == "Общий текст"
+            )
+            group["members"].append(
+                {
+                    "stable_identity": "new-coordinate",
+                    "relative_path": "radio/new.mo",
+                    "logical_key": "g-new",
+                    "context": "new radio context",
+                    "translation": "译法甲",
+                }
+            )
+            group["member_count"] += 1
+        target = (
+            self.project.config.paths.output
+            / "preview"
+            / run_id
+            / "reports"
+            / "qa-review-index.json"
+        )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        return target
+
+    def test_exact_membership_acknowledgement_persists_across_run_ids(self) -> None:
+        group, result = self._acknowledge()
+        self.assertEqual(1, result["intentional_variant_groups"])
+        self.assertEqual("pending", self.service.ledger(self.project.RUN_ID).state_of(group["group_id"]))
+
+        current_sources = {item["source"] for item in self.service.groups(self.project.RUN_ID)["groups"]}
+        self.assertNotIn("Общий текст", current_sources)
+
+        self._clone_index("run-2")
+        future_sources = {item["source"] for item in self.service.groups("run-2")["groups"]}
+        self.assertNotIn("Общий текст", future_sources)
+        counters = self.service.session("run-2")["counters"]
+        self.assertEqual(2, counters["same_source_diagnostic_groups"])
+        self.assertEqual(1, counters["same_source_groups"])
+        self.assertEqual(1, counters["intentional_variant_groups"])
+
+        event = self.service._log().read_all()[-1]
+        self.assertEqual("intentional_variant", event.action)
+        self.assertEqual(group["group_id"], event.details["group_id"])
+        self.assertEqual(
+            sorted(member["stable_identity"] for member in group["members"]),
+            sorted(event.targets),
+        )
+
+    def test_new_same_source_coordinate_breaks_exact_membership_and_reappears(self) -> None:
+        self._acknowledge()
+        self._clone_index("run-2", add_member=True)
+        group = self._group("run-2")
+        self.assertEqual(4, group["member_count"])
+        self.assertIn(
+            "new-coordinate",
+            {member["stable_identity"] for member in group["members"]},
+        )
+
+    def test_acknowledgement_does_not_modify_raw_qa_or_glossary_projection(self) -> None:
+        index_path = self.service._index_path(self.project.RUN_ID)
+        self.assertIsNotNone(index_path)
+        report_path = index_path.parent / "qa-report.json"
+        before_report = json.loads(report_path.read_text(encoding="utf-8"))
+        before_warning_count = sum(
+            1 for issue in before_report["issues"]
+            if issue["code"] == "same_source_inconsistency"
+        )
+        before_glossary = self.service.glossary_clusters(self.project.RUN_ID)
+
+        group, _result = self._acknowledge()
+
+        raw_index = json.loads(index_path.read_text(encoding="utf-8"))
+        self.assertIn(
+            group["group_id"],
+            {item["group_id"] for item in raw_index["same_source_groups"]},
+        )
+        after_report = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            before_warning_count,
+            sum(
+                1 for issue in after_report["issues"]
+                if issue["code"] == "same_source_inconsistency"
+            ),
+        )
+        self.assertEqual(before_glossary, self.service.glossary_clusters(self.project.RUN_ID))
+
+    def test_majority_bulk_ignores_exact_acknowledged_group(self) -> None:
+        group, _result = self._acknowledge(source="多数文本")
+        majority_ids = [member["stable_identity"] for member in group["members"]]
+        outcome = self.service.unify_majorities(
+            self.project.RUN_ID,
+            reason="只处理仍未解决的同源组",
+            expected_log_revision=self.service.session(self.project.RUN_ID)["log_revision"],
+        )
+        self.assertEqual(0, outcome["groups_eligible"])
+        self.assertEqual(0, outcome["items_written"])
+        with SQLiteTranslationMemory(self.project.config.tm.database) as tm:
+            self.assertEqual({}, tm.rows_for(majority_ids))
+
+
 class DashboardCompositionTests(unittest.TestCase):
     def setUp(self) -> None:
         self._temp = tempfile.TemporaryDirectory()
@@ -271,6 +426,8 @@ class DashboardCompositionTests(unittest.TestCase):
         self.assertIn("项目状态", html)
         self.assertIn("统一前坐标预览", html)
         self.assertIn("唯一最高频只代表当前分布", html)
+        self.assertIn("确认保留语境差异", html)
+        self.assertIn("未来多出任何同源坐标", html)
 
     def test_task_and_review_services_share_one_tm_maintenance_lock(self) -> None:
         self.assertTrue(self.server.reviews)
