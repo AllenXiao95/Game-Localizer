@@ -1,8 +1,8 @@
 """Review coordination and current-state projection at the local Dashboard boundary.
 
 The legacy :class:`ReviewService` owns the baseline validation/business semantics.
-This module adds four production-boundary guarantees that need the current TM
-snapshot under one process-local lock:
+This module adds five production-boundary guarantees that need current Review/TM
+state without broadening TM identity or QA semantics:
 
 1. every Dashboard Review mutation shares the same maintenance RLock as task
    submission / TM maintenance, so ``check -> TM -> decision log`` cannot be
@@ -11,11 +11,13 @@ snapshot under one process-local lock:
 3. same-source ``unify`` fails closed before overwriting an existing divergent
    Review-owned human finalization;
 4. same-source Review reads expose current TM rows for operator preview without
-   making preview state part of mutation semantics.
+   making preview state part of mutation semantics;
+5. an explicitly acknowledged contextual variant is remembered by exact
+   ``group_id + member set`` and suppressed only from unresolved Review work.
 
-It deliberately does not add a second audit store, override workflow, or duplicate
-commit/unify implementations. Old ReviewService callers remain compatible;
-production Dashboard services use the coordinated subclass.
+It deliberately does not add a second audit store, exception table, context matcher,
+or workflow/state-machine layer. Raw QA/ReviewIndex evidence stays immutable; the
+append-only Review decision log remains the authority for the acknowledgement.
 """
 from __future__ import annotations
 
@@ -35,7 +37,7 @@ from localizer.application.review_log import (
     ReviewDecisionLog,
 )
 
-from .review import ReviewConflict, ReviewService
+from .review import MAX_DECISION_ITEMS, ReviewConflict, ReviewService
 
 _TM_MUTATION_ACTIONS = {"commit", "unify", "accept_debt", "retire", "revert"}
 
@@ -115,24 +117,120 @@ class CoordinatedReviewService(ReviewService):
                 return False
         return True
 
+    @staticmethod
+    def _group_signature(group):
+        return (
+            str(group.get("group_id") or ""),
+            frozenset(
+                str(member.get("stable_identity") or "")
+                for member in group.get("members") or ()
+                if member.get("stable_identity")
+            ),
+        )
+
+    def _intentional_variant_signatures(self):
+        """Return durable acknowledgements from the existing append-only log.
+
+        The event's run_id is intentionally ignored here: persistence across run IDs
+        is the feature. Exact membership is the safety boundary, so a newly appearing
+        coordinate makes the current signature different and the group reappears.
+        """
+        return {
+            (
+                str(event.details.get("group_id") or ""),
+                frozenset(str(target) for target in event.targets if target),
+            )
+            for event in self._log().read_all()
+            if event.action == "intentional_variant"
+            and event.details.get("group_id")
+            and event.targets
+        }
+
+    def session(self, run_id: str):
+        """Keep counters aligned with unresolved Review work, not raw QA evidence."""
+        payload = super().session(run_id)
+        if not payload.get("available"):
+            return payload
+        raw_groups = list(self.index(run_id).same_source_groups)
+        acknowledged = self._intentional_variant_signatures()
+        groups = [
+            group
+            for group in raw_groups
+            if self._group_signature(group) not in acknowledged
+        ]
+        with_majority = sum(1 for group in groups if group.get("majority"))
+        with_plurality = sum(1 for group in groups if self._plurality_of(group))
+        collapsible = sum(1 for group in groups if group.get("normalized_collapse"))
+        counters = payload["counters"]
+        counters.update(
+            {
+                # Raw evidence remains in ReviewIndex/QA; this is the unresolved UI count.
+                "same_source_diagnostic_groups": len(raw_groups),
+                "same_source_groups": len(groups),
+                "intentional_variant_groups": len(raw_groups) - len(groups),
+                "groups_with_majority": with_majority,
+                "groups_with_plurality": with_plurality,
+                "groups_normalized_collapse": collapsible,
+                "groups_needing_case_by_case": len(groups) - with_plurality,
+            }
+        )
+        return payload
+
     def groups(self, run_id: str, **kwargs):
-        """Overlay current TM fields onto immutable same-source group members."""
-        payload = super().groups(run_id, **kwargs)
-        groups = list(payload.get("groups") or ())
+        """Hide only exact acknowledged groups, then overlay current TM evidence.
+
+        Filtering happens before this method's outward pagination. The base service is
+        still the single implementation of group decoration/sorting; we only consume
+        its pages, remove exact acknowledged signatures, and page the remainder.
+        """
+        limit = max(1, min(int(kwargs.get("limit", 100)), 500))
+        offset = max(0, int(kwargs.get("offset", 0)))
+        has_majority = kwargs.get("has_majority")
+        query = str(kwargs.get("query", ""))
+        acknowledged = self._intentional_variant_signatures()
+
+        rows = []
+        hidden = 0
+        base_offset = 0
+        while True:
+            page = super().groups(
+                run_id,
+                limit=500,
+                offset=base_offset,
+                has_majority=has_majority,
+                query=query,
+            )
+            batch = list(page.get("groups") or ())
+            for group in batch:
+                if self._group_signature(group) in acknowledged:
+                    hidden += 1
+                else:
+                    rows.append(group)
+            base_offset += len(batch)
+            if not batch or base_offset >= int(page.get("total", 0)):
+                break
+
+        window = rows[offset : offset + limit]
         identities = [
             member["stable_identity"]
-            for group in groups
+            for group in window
             for member in group.get("members") or ()
             if member.get("stable_identity")
         ]
         if not identities:
-            return payload
+            return {
+                "available": True,
+                "total": len(rows),
+                "offset": offset,
+                "intentional_variant_hidden": hidden,
+                "groups": window,
+            }
 
         with SQLiteTranslationMemory(self.config.tm.database, read_only=True) as tm:
             current = tm.rows_for(identities)
 
         decorated = []
-        for group in groups:
+        for group in window:
             members = []
             for raw in group.get("members") or ():
                 member = dict(raw)
@@ -157,7 +255,13 @@ class CoordinatedReviewService(ReviewService):
                 )
                 members.append(member)
             decorated.append({**group, "members": members})
-        return {**payload, "groups": decorated}
+        return {
+            "available": True,
+            "total": len(rows),
+            "offset": offset,
+            "intentional_variant_hidden": hidden,
+            "groups": decorated,
+        }
 
     def commit(self, run_id: str, edits: Mapping[str, str], **kwargs):
         """Serialize Review writes and keep same-source convenience actions conservative.
@@ -242,8 +346,56 @@ class CoordinatedReviewService(ReviewService):
             return super().exclude_glossary_scope(run_id, cluster_id, path_glob, **kwargs)
 
     def mark(self, run_id: str, items: Sequence[Mapping[str, object]], **kwargs):
+        """Reuse the existing decisions endpoint for whole-group acknowledgements."""
         with self._mutation_lock:
-            return super().mark(run_id, items, **kwargs)
+            actions = {str(item.get("action", "")) for item in items}
+            if "intentional_variant" not in actions:
+                return super().mark(run_id, items, **kwargs)
+            if actions != {"intentional_variant"}:
+                raise ValueError(
+                    "intentional_variant decisions cannot be mixed with draft/skip/defer"
+                )
+            if len(items) > MAX_DECISION_ITEMS:
+                raise ValueError(f"at most {MAX_DECISION_ITEMS} items per request")
+
+            index = self.index(run_id)
+            actor = self._actor()
+            events = []
+            for item in items:
+                group_id = str(item.get("target_id", ""))
+                reason = str(item.get("reason", "")).strip()
+                if not reason:
+                    raise ValueError("intentional_variant requires a non-empty reason")
+                group = index.group_for(group_id)
+                if group is None:
+                    raise ValueError(f"unknown same-source group: {group_id}")
+                # The server derives membership from this run's immutable index; the
+                # client never gets to choose which coordinates the acknowledgement covers.
+                members = tuple(
+                    sorted(
+                        str(member["stable_identity"])
+                        for member in group.get("members") or ()
+                    )
+                )
+                events.append(
+                    ReviewDecisionEvent(
+                        action="intentional_variant",
+                        run_id=run_id,
+                        targets=members,
+                        reason=reason,
+                        details={"group_id": group_id},
+                        actor=actor,
+                    )
+                )
+            revision = self._log().append(
+                events,
+                expected_revision=kwargs.get("expected_log_revision"),
+            )
+            return {
+                "log_revision": revision,
+                "counters": self.ledger(run_id).counters(),
+                "intentional_variant_groups": len(events),
+            }
 
     def revert(
         self,

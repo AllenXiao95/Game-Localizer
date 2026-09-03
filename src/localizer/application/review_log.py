@@ -24,7 +24,8 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 # 因此这次只是向后兼容扩展，不需要把既有月分片整体迁移到 v2。
 SCHEMA_VERSION = 1
 
-# 决策事件的动作。draft 不写 TM，只进 ledger；其余都对应一次 TM 写入或术语变更。
+# 决策事件的动作。intentional_variant 与 draft/skip/defer 一样不写 TM；
+# 它只记录“这组精确坐标允许存在语境差异”，供后续 run 的 Review 投影消费。
 ACTIONS = {
     "draft",       # 草稿：操作者填了译文但还没提交
     "commit",      # 落表：写 TM
@@ -35,6 +36,7 @@ ACTIONS = {
     "revert",      # 撤销：按前像还原
     "skip",        # 跳过（不处理）
     "defer",       # 待议
+    "intentional_variant", # 同源组语境差异确认：只进日志，不改 QA/TM/glossary
 }
 
 EMPTY_REVISION = "0:0000000000000000"
