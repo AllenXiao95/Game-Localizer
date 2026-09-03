@@ -2,7 +2,7 @@
  *
  * The main dashboard intentionally stays dependency-free and self-contained. The
  * HTTP server already inlines this repo-owned extension after index.html, so keep
- * the Prevention preview here instead of adding another runtime asset/wrapper.
+ * the Prevention UI here instead of adding another runtime asset/wrapper.
  */
 (() => {
   const originalReviewShell = reviewShell;
@@ -88,7 +88,30 @@
           <td>${previewText(member.current_translation)}</td>
           <td>${authorityChip(member)}</td>
         </tr>`).join("")}
-      </tbody></table></div>`);
+      </tbody></table></div>
+      <div class="rowflex" style="margin:8px 0 10px">
+        <button class="secondary" id="groupIntentionalVariant">确认保留语境差异</button>
+        <span class="muted">只确认当前完整成员集合；未来多出任何同源坐标时，这组会重新进入待处理列表。</span>
+      </div>`);
+
+    const reasonInput = $("groupReason");
+    if (reasonInput) reasonInput.placeholder = "统一 / 保留语境差异理由（必填）";
+    $("groupIntentionalVariant")?.addEventListener("click", async () => {
+      const reason = $("groupReason")?.value.trim() || "";
+      if (!reason) {
+        reviewNote("请填写保留语境差异的理由 —— 它会进入决策日志。", "warn");
+        return;
+      }
+      await runReviewAction(() => postApi("/api/review/decisions", {
+        run_id: selectedRun,
+        items: [{
+          target_id: group.group_id,
+          action: "intentional_variant",
+          reason,
+        }],
+        expected_log_revision: review.session.log_revision,
+      }));
+    });
   }
 
   async function loadRecoveryQueue() {
@@ -100,7 +123,7 @@
       review.rows = payload.operations || [];
       review.recoveryRevision = payload.log_revision;
       box.innerHTML = review.rows.length ? review.rows.map((op, i) => `
-        <div class="qitem" data-idx="${i}" ${i === 0 ? 'aria-selected="true"' : ""}>
+        <div class="qitem" data-idx="${i}" ${i === 0 ? ' aria-selected="true"' : ""}>
           <div class="mono">${esc(op.action)} · ${esc(op.decided_at)}</div>
           <div class="var">${esc(op.translation || "（多译法/无译文）")}</div>
           <div class="src">${num(op.coordinate_count)} 个坐标 · 可安全撤销 ${num(op.revertible_count)}
