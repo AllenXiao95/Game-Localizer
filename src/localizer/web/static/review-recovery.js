@@ -40,28 +40,37 @@
       : `<span class="visible-text">${visibleBreaks(String(value))}</span>`;
   }
 
+  function isHumanAuthority(member) {
+    return Boolean(member.current_human_authored) && (
+      Boolean(member.current_is_formal)
+      || member.current_review_state === "reviewed"
+      || member.current_review_state === "locked"
+    );
+  }
+
   function authorityChip(member) {
-    if (member.review_human_committed) {
-      return '<span class="chip warn">Review 人工定稿</span>';
-    }
-    if (member.human_committed) {
+    if (!member.current_from_tm) return '<span class="chip">本次 run</span>';
+    if (isHumanAuthority(member)) {
       return `<span class="chip warn">${esc(member.current_origin || "human")} · 人工权威</span>`;
     }
-    if (member.current_from_tm) {
-      const state = member.current_review_state ? ` · ${esc(member.current_review_state)}` : "";
-      return `<span class="chip">TM · ${esc(member.current_origin || "unknown")}${state}</span>`;
-    }
-    return `<span class="chip">本次 run · ${esc(member.current_origin || "unknown")}</span>`;
+    const state = member.current_review_state ? ` · ${esc(member.current_review_state)}` : "";
+    return `<span class="chip">TM · ${esc(member.current_origin || "unknown")}${state}</span>`;
   }
 
   function renderSameSourcePreview(group) {
     const detail = $("reviewDetail");
     if (!detail || !group) return;
     const members = group.members || [];
-    const humanCount = Number(group.human_committed_members || 0);
-    const distribution = (group.current_variants || group.variants || [])
-      .map((item) => `${esc(item.translation || "（空）")} ×${num(item.count)}`)
+    const counts = {};
+    members.forEach((member) => {
+      const text = String(member.current_translation || "");
+      counts[text] = (counts[text] || 0) + 1;
+    });
+    const distribution = Object.entries(counts)
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .map(([text, count]) => `${esc(text || "（空）")} ×${num(count)}`)
       .join(" · ") || "—";
+    const humanCount = members.filter(isHumanAuthority).length;
     detail.insertAdjacentHTML("afterbegin", `
       <div class="note" style="border-color:${humanCount ? "var(--warn)" : "var(--border)"};margin:0 0 10px">
         <b>统一前坐标预览</b>：唯一最高频只代表当前分布，<b>不代表语义正确</b>。
@@ -75,7 +84,7 @@
         ${members.map((member) => `<tr>
           <td class="mono">${esc(member.relative_path || "—")}<br>${esc(member.logical_key || member.stable_identity)}</td>
           <td>${member.context ? esc(member.context) : '<span class="muted">—</span>'}</td>
-          <td>${previewText(member.run_translation ?? member.translation)}</td>
+          <td>${previewText(member.translation)}</td>
           <td>${previewText(member.current_translation)}</td>
           <td>${authorityChip(member)}</td>
         </tr>`).join("")}
