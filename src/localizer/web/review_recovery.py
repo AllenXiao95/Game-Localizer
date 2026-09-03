@@ -7,6 +7,7 @@ never rewrites immutable run/QA sidecars.
 """
 from __future__ import annotations
 
+import json
 from collections import OrderedDict
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
@@ -15,9 +16,13 @@ from localizer.adapters.storage.sqlite_tm import (
     SQLiteTranslationMemory,
     TMGuardError,
 )
-from localizer.application.review_log import LogRevisionMismatch, ReviewDecisionEvent
+from localizer.application.review_log import (
+    ACTIONS,
+    LogRevisionMismatch,
+    ReviewDecisionEvent,
+)
 
-from .review import ReviewConflict, ReviewService
+from .review import ReviewConflict, ReviewService, ReviewUnavailable
 
 # These actions mutate the TM projection for a coordinate.  Draft/skip/defer and
 # glossary decisions do not.  A later mutation makes an older decision stale even
@@ -26,6 +31,7 @@ from .review import ReviewConflict, ReviewService
 _TM_MUTATION_ACTIONS = {"commit", "unify", "accept_debt", "retire", "revert"}
 _RECOVERABLE_ACTIONS = {"commit", "unify", "accept_debt"}
 _RECOVERY_ACTION_FILTERS = _RECOVERABLE_ACTIONS | {"all"}
+_PROJECT_HISTORY_STATUSES = {"all", "current", "superseded", "reverted", "mixed", "recorded"}
 MAX_RECOVERY_ITEMS = 500
 
 
@@ -92,6 +98,20 @@ def _revertibility(
     return True, ""
 
 
+def _coordinate_value(
+    name: str,
+    payload: Optional[Mapping[str, Any]],
+    before: Optional[Mapping[str, Any]],
+    current: Optional[Mapping[str, Any]],
+    default: str = "",
+) -> str:
+    for source in (payload or {}, before or {}, current or {}):
+        raw = source.get(name)
+        if raw is not None and raw != "":
+            return str(raw)
+    return default
+
+
 def recovery_operations(
     service: ReviewService,
     run_id: str,
@@ -146,27 +166,22 @@ def recovery_operations(
                     current_row=current,
                     payload=payload,
                 )
-                sources = [
-                    payload or {},
-                    before or {},
-                    current or {},
-                ]
-
-                def value(name: str, default: str = "") -> str:
-                    for source in sources:
-                        raw = source.get(name)
-                        if raw is not None and raw != "":
-                            return str(raw)
-                    return default
-
                 coordinates.append(
                     {
                         "decision_id": event.decision_id,
                         "stable_identity": identity,
-                        "relative_path": value("relative_path"),
-                        "logical_key": value("logical_key"),
-                        "source_text": value("source_text"),
-                        "source_fingerprint": value("source_fingerprint"),
+                        "relative_path": _coordinate_value(
+                            "relative_path", payload, before, current
+                        ),
+                        "logical_key": _coordinate_value(
+                            "logical_key", payload, before, current
+                        ),
+                        "source_text": _coordinate_value(
+                            "source_text", payload, before, current
+                        ),
+                        "source_fingerprint": _coordinate_value(
+                            "source_fingerprint", payload, before, current
+                        ),
                         "before_translation": (
                             None if before is None else before.get("translation")
                         ),
@@ -213,6 +228,272 @@ def recovery_operations(
         "total": len(operations),
         "operations": bounded,
         "log_revision": log.revision(),
+    }
+
+
+def _project_coordinate_status(
+    *,
+    event: ReviewDecisionEvent,
+    identity: str,
+    latest_mutation: Mapping[str, str],
+    reverted_decisions: set[str],
+    current_row: Optional[Mapping[str, Any]],
+) -> str:
+    if event.action not in _RECOVERABLE_ACTIONS:
+        return "recorded"
+    if event.decision_id in reverted_decisions:
+        return "reverted"
+    if latest_mutation.get(identity) != event.decision_id:
+        return "superseded"
+    if not _current_matches_written_state(current_row, event, None):
+        return "superseded"
+    return "current"
+
+
+def _operation_status(action: str, coordinates: Sequence[Mapping[str, Any]]) -> str:
+    if action not in _RECOVERABLE_ACTIONS:
+        return "recorded"
+    statuses = {str(item.get("status") or "superseded") for item in coordinates}
+    if not statuses:
+        return "recorded"
+    if len(statuses) == 1:
+        return next(iter(statuses))
+    return "mixed"
+
+
+def project_change_history(
+    service: ReviewService,
+    *,
+    action: str = "all",
+    status: str = "all",
+    run_id: str = "",
+    query: str = "",
+    limit: int = 100,
+    offset: int = 0,
+) -> Dict[str, Any]:
+    """Return project-level Review change history across all runs.
+
+    This is deliberately *Review history*, not a generic TM event-sourcing layer.
+    Provider writes, planner lifecycle events and ``tm_source_history`` remain outside
+    this view.  The existing append-only ReviewDecisionLog stays the sole authority.
+
+    Grouping uses ``(run_id, action, audit_id)`` so one operator action can expand to
+    its coordinate-level before/after/current state without accidentally combining
+    unrelated runs.  Recovery still goes through :func:`safe_revert`; this query adds
+    no second write path.
+    """
+    if action != "all" and action not in ACTIONS:
+        raise ValueError(
+            f"unsupported project history action {action!r}; expected 'all' or one of {sorted(ACTIONS)}"
+        )
+    if status not in _PROJECT_HISTORY_STATUSES:
+        raise ValueError(
+            f"unsupported project history status {status!r}; expected one of {sorted(_PROJECT_HISTORY_STATUSES)}"
+        )
+    limit = max(1, min(int(limit), 200))
+    offset = max(0, int(offset))
+    wanted_run = str(run_id or "").strip()
+    needle = str(query or "").strip().casefold()
+
+    log = service._log()
+    all_events = log.read_all()
+    latest_mutation = _latest_mutation_by_target(all_events)
+    reverted_decisions: set[str] = set()
+    for event in all_events:
+        if event.action == "revert":
+            reverted_decisions.update(
+                str(item)
+                for item in (event.details.get("reverted_decision_ids") or [])
+                if str(item)
+            )
+
+    candidates = [
+        event
+        for event in all_events
+        if (action == "all" or event.action == action)
+        and (not wanted_run or event.run_id == wanted_run)
+    ]
+    identities = list(
+        dict.fromkeys(target for event in candidates for target in event.targets)
+    )
+    with SQLiteTranslationMemory(service.config.tm.database) as tm:
+        current_rows = tm.rows_for(identities)
+
+    grouped: "OrderedDict[tuple[str, str, str], List[ReviewDecisionEvent]]" = OrderedDict()
+    for event in candidates:
+        audit_id = str(event.details.get("audit_id") or event.decision_id)
+        grouped.setdefault((event.run_id, event.action, audit_id), []).append(event)
+
+    operations: List[Dict[str, Any]] = []
+    for (event_run_id, event_action, audit_id), events in grouped.items():
+        coordinates: List[Dict[str, Any]] = []
+        for event in events:
+            for identity in event.targets:
+                before = event.before.get(identity)
+                current = current_rows.get(identity)
+                coordinate_status = _project_coordinate_status(
+                    event=event,
+                    identity=identity,
+                    latest_mutation=latest_mutation,
+                    reverted_decisions=reverted_decisions,
+                    current_row=current,
+                )
+                conflict = ""
+                if coordinate_status == "reverted":
+                    conflict = "该 Review 决策已经被后续 revert 撤销"
+                elif coordinate_status == "superseded":
+                    conflict = "该坐标在此决策后已有新的人工/TM 状态"
+                coordinates.append(
+                    {
+                        "decision_id": event.decision_id,
+                        "stable_identity": identity,
+                        "relative_path": _coordinate_value(
+                            "relative_path", None, before, current
+                        ),
+                        "logical_key": _coordinate_value(
+                            "logical_key", None, before, current
+                        ),
+                        "source_text": _coordinate_value(
+                            "source_text", None, before, current
+                        ),
+                        "source_fingerprint": _coordinate_value(
+                            "source_fingerprint", None, before, current
+                        ),
+                        "before_translation": (
+                            None if before is None else before.get("translation")
+                        ),
+                        "after_translation": event.translation,
+                        "current_translation": (
+                            None if current is None else current.get("translation")
+                        ),
+                        "current_origin": (
+                            None if current is None else current.get("origin")
+                        ),
+                        "current_review_state": (
+                            None if current is None else current.get("review_state")
+                        ),
+                        "status": coordinate_status,
+                        # Filled with the stronger run-index check after paging.  A
+                        # project history query must not open every historical run.
+                        "revertible": False,
+                        "conflict_reason": conflict,
+                    }
+                )
+
+        first = events[0]
+        translations = {event.translation for event in events}
+        operation = {
+            "audit_id": audit_id,
+            "run_id": event_run_id,
+            "action": event_action,
+            "decided_at": events[-1].decided_at,
+            "reason": first.reason,
+            "actor": dict(first.actor),
+            "translation": next(iter(translations)) if len(translations) == 1 else None,
+            "details": dict(first.details),
+            "decision_ids": [event.decision_id for event in events],
+            "coordinate_count": len(coordinates),
+            "current_count": sum(1 for item in coordinates if item["status"] == "current"),
+            "superseded_count": sum(
+                1 for item in coordinates if item["status"] == "superseded"
+            ),
+            "reverted_count": sum(
+                1 for item in coordinates if item["status"] == "reverted"
+            ),
+            "revertible_count": 0,
+            "conflict_count": 0,
+            "coordinates": coordinates,
+        }
+        operation["status"] = _operation_status(event_action, coordinates)
+        if status != "all" and operation["status"] != status:
+            continue
+        if needle:
+            haystack = json.dumps(operation, ensure_ascii=False, sort_keys=True).casefold()
+            if needle not in haystack:
+                continue
+        operations.append(operation)
+
+    # Append order is authoritative; reverse only after grouping so latest operator
+    # actions appear first without re-sorting equal timestamps by random UUIDs.
+    operations.reverse()
+    total = len(operations)
+    bounded = operations[offset : offset + limit]
+
+    # Strong recovery eligibility is intentionally calculated only for the visible
+    # page.  This keeps a project-level audit over years of runs cheap while making
+    # every checkbox on screen trustworthy.
+    indexes: Dict[str, Optional[Mapping[str, Mapping[str, Any]]]] = {}
+    for operation in bounded:
+        if operation["action"] not in _RECOVERABLE_ACTIONS:
+            continue
+        op_run_id = str(operation["run_id"])
+        if op_run_id not in indexes:
+            try:
+                indexes[op_run_id] = service.index(op_run_id).units
+            except ReviewUnavailable:
+                indexes[op_run_id] = None
+        units = indexes[op_run_id]
+        for coordinate in operation["coordinates"]:
+            if coordinate["status"] != "current":
+                continue
+            if units is None:
+                coordinate["conflict_reason"] = (
+                    "对应 run 的 ReviewIndex 已不可用，项目历史仍可查看，但不能从 GUI 安全撤销"
+                )
+                continue
+            identity = str(coordinate["stable_identity"])
+            event = next(
+                (
+                    candidate
+                    for candidate in all_events
+                    if candidate.decision_id == coordinate["decision_id"]
+                ),
+                None,
+            )
+            if event is None:
+                coordinate["conflict_reason"] = "找不到原始 Review 决策"
+                continue
+            revertible, conflict = _revertibility(
+                event=event,
+                identity=identity,
+                latest_mutation=latest_mutation,
+                current_row=current_rows.get(identity),
+                payload=units.get(identity),
+            )
+            coordinate["revertible"] = revertible
+            coordinate["conflict_reason"] = conflict
+
+        operation["revertible_count"] = sum(
+            1 for item in operation["coordinates"] if item["revertible"]
+        )
+        operation["conflict_count"] = sum(
+            1
+            for item in operation["coordinates"]
+            if item["status"] == "current" and not item["revertible"]
+        )
+
+    run_ids = list(
+        dict.fromkeys(
+            event.run_id for event in reversed(all_events) if str(event.run_id).strip()
+        )
+    )
+    return {
+        "available": True,
+        "scope": "project_review_history",
+        "action": action,
+        "status": status,
+        "run_id": wanted_run,
+        "query": query,
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "operations": bounded,
+        "run_ids": run_ids,
+        "log_revision": log.revision(),
+        "note": (
+            "仅覆盖 append-only ReviewDecisionLog 中的人工审查/操作决策；"
+            "不代表 Provider、Planner 或 TM 生命周期的完整事件流。"
+        ),
     }
 
 
