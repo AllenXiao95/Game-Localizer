@@ -163,13 +163,46 @@ class DivergentHumanPreventionTests(unittest.TestCase):
         with SQLiteTranslationMemory(self.project.config.tm.database) as tm:
             return tm.rows_for(list(identities))
 
+    def _group(self, source="Общий текст"):
+        return next(
+            item
+            for item in self.service.groups(self.project.RUN_ID)["groups"]
+            if item["source"] == source
+        )
+
+    def test_group_preview_overlays_current_tm_and_authority(self) -> None:
+        run_id = self.project.RUN_ID
+        protected = self.project.identity("g2")
+        before = self._group()
+        original = next(
+            member for member in before["members"] if member["stable_identity"] == protected
+        )
+        self.assertEqual("g2", original["logical_key"])
+        self.assertEqual("译法乙", original["current_translation"])
+        self.assertFalse(original["current_from_tm"])
+        self.assertFalse(original["current_human_authored"])
+
+        self.service.commit(
+            run_id,
+            {protected: "收到！"},
+            reason="无线电语境人工定稿",
+        )
+
+        after = self._group()
+        current = next(
+            member for member in after["members"] if member["stable_identity"] == protected
+        )
+        self.assertEqual("译法乙", current["translation"])
+        self.assertEqual("收到！", current["current_translation"])
+        self.assertTrue(current["current_from_tm"])
+        self.assertEqual("human", current["current_origin"])
+        self.assertEqual("reviewed", current["current_review_state"])
+        self.assertTrue(current["current_is_formal"])
+        self.assertTrue(current["current_human_authored"])
+
     def test_group_unify_refuses_divergent_existing_human_finalization(self) -> None:
         run_id = self.project.RUN_ID
-        group = next(
-            item
-            for item in self.service.groups(run_id)["groups"]
-            if item["source"] == "Общий текст"
-        )
+        group = self._group()
         protected = self.project.identity("g2")
         self.service.commit(
             run_id,
@@ -236,6 +269,8 @@ class DashboardCompositionTests(unittest.TestCase):
         self.assertIn("变更历史 / Recovery", html)
         self.assertIn("Review Change History", html)
         self.assertIn("项目状态", html)
+        self.assertIn("统一前坐标预览", html)
+        self.assertIn("唯一最高频只代表当前分布", html)
 
     def test_task_and_review_services_share_one_tm_maintenance_lock(self) -> None:
         self.assertTrue(self.server.reviews)

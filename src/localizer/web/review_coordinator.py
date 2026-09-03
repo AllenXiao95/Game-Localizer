@@ -1,7 +1,7 @@
-"""Review mutation coordination at the local Dashboard boundary.
+"""Review coordination and current-state projection at the local Dashboard boundary.
 
 The legacy :class:`ReviewService` owns the baseline validation/business semantics.
-This module adds three production-boundary guarantees that need the current TM
+This module adds four production-boundary guarantees that need the current TM
 snapshot under one process-local lock:
 
 1. every Dashboard Review mutation shares the same maintenance RLock as task
@@ -9,7 +9,9 @@ snapshot under one process-local lock:
    interleaved by another Dashboard write;
 2. newly appended TM-mutation decisions carry a complete ``after`` row snapshot;
 3. same-source ``unify`` fails closed before overwriting an existing divergent
-   Review-owned human finalization.
+   Review-owned human finalization;
+4. same-source Review reads expose current TM rows for operator preview without
+   making preview state part of mutation semantics.
 
 It deliberately does not add a second audit store, override workflow, or duplicate
 commit/unify implementations. Old ReviewService callers remain compatible;
@@ -112,6 +114,50 @@ class CoordinatedReviewService(ReviewService):
             if actual != expected:
                 return False
         return True
+
+    def groups(self, run_id: str, **kwargs):
+        """Overlay current TM fields onto immutable same-source group members."""
+        payload = super().groups(run_id, **kwargs)
+        groups = list(payload.get("groups") or ())
+        identities = [
+            member["stable_identity"]
+            for group in groups
+            for member in group.get("members") or ()
+            if member.get("stable_identity")
+        ]
+        if not identities:
+            return payload
+
+        with SQLiteTranslationMemory(self.config.tm.database, read_only=True) as tm:
+            current = tm.rows_for(identities)
+
+        decorated = []
+        for group in groups:
+            members = []
+            for raw in group.get("members") or ():
+                member = dict(raw)
+                row = current.get(member.get("stable_identity"))
+                member.update(
+                    {
+                        "current_translation": (
+                            str(row.get("translation") or "")
+                            if row is not None
+                            else str(member.get("translation") or "")
+                        ),
+                        "current_from_tm": row is not None,
+                        "current_origin": str(row.get("origin") or "") if row else "",
+                        "current_review_state": (
+                            str(row.get("review_state") or "") if row else ""
+                        ),
+                        "current_is_formal": bool(row.get("is_formal")) if row else False,
+                        "current_human_authored": (
+                            bool(row.get("human_authored")) if row else False
+                        ),
+                    }
+                )
+                members.append(member)
+            decorated.append({**group, "members": members})
+        return {**payload, "groups": decorated}
 
     def commit(self, run_id: str, edits: Mapping[str, str], **kwargs):
         """Serialize Review writes and keep same-source convenience actions conservative.
