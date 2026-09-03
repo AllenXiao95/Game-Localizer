@@ -100,6 +100,7 @@ class SidecarContentTests(unittest.TestCase):
         for identity, unit in self.built.index.units.items():
             self.assertIn("source_text", unit)
             self.assertIn("translation", unit)
+            self.assertIn("context", unit)
             self.assertTrue(unit["source_text"])
 
     def test_group_members_include_the_empty_translation(self) -> None:
@@ -123,6 +124,16 @@ class SidecarContentTests(unittest.TestCase):
             i for i in report["issues"] if i["code"] == "same_source_inconsistency"
         )
         self.assertEqual(2, len(record["details"]["translations"]))
+
+    def test_group_members_carry_coordinate_context_fields(self) -> None:
+        group = next(
+            g for g in self.built.index.same_source_groups if g["source"] == "Общий текст"
+        )
+        for member in group["members"]:
+            unit = self.built.index.units[member["stable_identity"]]
+            self.assertEqual(unit["logical_key"], member["logical_key"])
+            self.assertIn("context", member)
+            self.assertEqual(unit["context"], member["context"])
 
     def test_source_buckets_cover_every_unit(self) -> None:
         # 桶是「这次编辑刚造出一条新分歧」的唯一判据，必须覆盖全量而不只是问题词条。
