@@ -1,9 +1,7 @@
-"""Dashboard HTTP wrapper that injects client-side i18n and workflow UX runtimes.
+"""Dashboard presentation layer: i18n + workflow UX over the core Review server.
 
-The existing dashboard remains a self-contained operator surface. The i18n layer runs before the
-legacy dashboard script so its DOM mutations are localized in place. Workflow UX layers run after
-the legacy script so they can safely decorate existing state/render functions without
-reimplementing task, review, build, or publish authority.
+Presentation now composes through ``render_index_html``.  It does not replace module
+globals or bypass the core server's mandatory Review assets/routes.
 """
 from __future__ import annotations
 
@@ -11,7 +9,7 @@ import json
 from pathlib import Path
 from typing import Optional
 
-from . import server as _legacy
+from . import server as _core
 
 _I18N_MARKER = "<!-- localizer-dashboard-i18n -->"
 _WORKFLOW_MARKER = "<!-- localizer-dashboard-workflow-ux -->"
@@ -28,15 +26,10 @@ _WORKFLOW_SCRIPTS = (
 
 
 def _augment_runtime(script: str) -> str:
-    """Merge all prose catalogs into the core runtime's PHRASES array.
-
-    Keeping one browser-side translation engine is important: a second MutationObserver can make
-    the first observer mistake translated English for a new source string, which breaks lossless
-    switching back to Chinese. Catalog data is therefore merged before the script executes.
-    """
+    """Merge all prose catalogs into the core runtime's PHRASES array."""
     phrases = []
     for catalog in _I18N_CATALOGS:
-        payload = json.loads((_legacy.STATIC_ROOT / catalog).read_text(encoding="utf-8"))
+        payload = json.loads((_core.STATIC_ROOT / catalog).read_text(encoding="utf-8"))
         phrases.extend(payload.get("phrases") or [])
     rendered = []
     for pair in phrases:
@@ -57,11 +50,10 @@ def _augment_runtime(script: str) -> str:
 
 
 def inject_dashboard_i18n(html: str) -> str:
-    """Inject one locale engine before the legacy dashboard script."""
+    """Inject one locale engine before the first Dashboard script."""
     if _I18N_MARKER in html:
         return html
-
-    script = (_legacy.STATIC_ROOT / "i18n.js").read_text(encoding="utf-8")
+    script = (_core.STATIC_ROOT / "i18n.js").read_text(encoding="utf-8")
     script = _augment_runtime(script)
     rendered = html.replace(
         'toLocaleString("zh-CN")',
@@ -78,11 +70,11 @@ def inject_dashboard_i18n(html: str) -> str:
 
 
 def inject_dashboard_workflow(html: str) -> str:
-    """Inject workflow layers after the legacy dashboard definitions are available."""
+    """Inject workflow UX after the core Dashboard/Review definitions."""
     if _WORKFLOW_MARKER in html:
         return html
     scripts = [
-        (_legacy.STATIC_ROOT / name).read_text(encoding="utf-8")
+        (_core.STATIC_ROOT / name).read_text(encoding="utf-8")
         for name in _WORKFLOW_SCRIPTS
     ]
     blocks = "\n".join(f"<script>\n{script}\n</script>" for script in scripts)
@@ -93,46 +85,21 @@ def inject_dashboard_workflow(html: str) -> str:
 
 
 def render_dashboard_html(html: str) -> str:
-    """Apply presentation-only dashboard extensions in deterministic order."""
+    """Apply presentation-only extensions in deterministic order."""
     return inject_dashboard_workflow(inject_dashboard_i18n(html))
 
 
-class _I18nHandler(_legacy._Handler):
-    """Serve the normal API surface, but enhance the dashboard HTML shell."""
+class _I18nHandler(_core._Handler):
+    """Presentation hook; all routing/static authority remains in the core handler."""
 
-    def _static(self, name: str, content_type: str) -> None:
-        if name != "index.html":
-            super()._static(name, content_type)
-            return
-        path = _legacy.STATIC_ROOT / name
-        if not path.is_file():
-            super()._static(name, content_type)
-            return
-        body = render_dashboard_html(path.read_text(encoding="utf-8")).encode("utf-8")
-        self._send(body, content_type)
+    def render_index_html(self, html: str) -> str:
+        return render_dashboard_html(super().render_index_html(html))
 
 
-class DashboardServer(_legacy.DashboardServer):
-    """DashboardServer using the enhanced request handler.
+class DashboardServer(_core.DashboardServer):
+    """Core DashboardServer with a normal presentation handler subclass."""
 
-    The base class constructs its ``ThreadingHTTPServer`` synchronously. Temporarily replacing the
-    module-level handler during that construction makes the resulting ``partial`` capture our
-    subclass without changing the mature routing/task/review implementation.
-    """
-
-    def __init__(
-        self,
-        collector: _legacy.DashboardCollector,
-        host: str = "127.0.0.1",
-        port: int = 8765,
-        enable_tasks: Optional[bool] = None,
-    ) -> None:
-        original = _legacy._Handler
-        _legacy._Handler = _I18nHandler
-        try:
-            super().__init__(collector, host=host, port=port, enable_tasks=enable_tasks)
-        finally:
-            _legacy._Handler = original
+    handler_class = _I18nHandler
 
 
 def serve(
@@ -144,7 +111,7 @@ def serve(
     variant: Optional[str] = None,
 ) -> None:
     server = DashboardServer(
-        _legacy.build_collector(config_path, repo_root, variant=variant), host, port
+        _core.build_collector(config_path, repo_root, variant=variant), host, port
     )
     try:
         server.serve_forever()

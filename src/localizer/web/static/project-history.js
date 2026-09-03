@@ -60,6 +60,13 @@
       ? `<span class="muted">${esc(emptyLabel)}</span>`
       : `<span class="visible-text">${visibleBreaks(String(value))}</span>`;
   }
+  function recoveryProofLabel(value) {
+    if (value === "after_image") return "after-image";
+    if (value === "before_image") return "before-image";
+    if (value === "review_index") return "ReviewIndex";
+    if (value === "missing_evidence") return "证据不足";
+    return value || "未知证据";
+  }
 
   function installProjectState() {
     const tmPanel = $("tmPanel");
@@ -245,7 +252,7 @@
         <input id="historyRevertReason" placeholder="撤销理由（必填）" style="flex:1 1 260px">
         <button class="action" id="historyApplyRevert" type="button" disabled>撤销累计所选坐标</button>
       </div>
-      <div id="historyRecoveryNote" class="note">撤销始终 fail-closed；旧 run 的 ReviewIndex 若已清理，只有 before-image 能证明 source/coordinate 未漂移时才启用 fallback。</div>
+      <div id="historyRecoveryNote" class="note">撤销始终 fail-closed；新事件优先直接校验记录的 after-image，旧事件才回退到 ReviewIndex / before-image compatibility proof。</div>
       ${details}`;
 
     $("historyOnlyRun").addEventListener("click", async () => {
@@ -345,9 +352,12 @@
         <span class="chip">页 ${num(Math.floor(c.offset / c.limit) + 1)} / ${num(Math.max(1, Math.ceil(payload.total / c.limit)))}</span>`;
       $("historyCoordPrev").disabled = c.offset <= 0;
       $("historyCoordNext").disabled = c.offset + c.limit >= payload.total;
-      const beforeProof = proofs.before_image || 0, indexProof = proofs.review_index || 0, missing = proofs.missing_evidence || 0;
-      $("historyRecoveryNote").innerHTML = `恢复证据：ReviewIndex <b>${num(indexProof)}</b> · before-image fallback <b>${num(beforeProof)}</b> · 证据不足 <b>${num(missing)}</b>。<br>
-        ${payload.run_index_available ? "历史 ReviewIndex 仍可用；正常按 run sidecar 校验。" : "历史 ReviewIndex 已不可用；仅 source/coordinate 元数据与完整 before-image 一致的坐标允许撤销。"}`;
+      const afterProof = proofs.after_image || 0,
+        beforeProof = proofs.before_image || 0,
+        indexProof = proofs.review_index || 0,
+        missing = proofs.missing_evidence || 0;
+      $("historyRecoveryNote").innerHTML = `恢复证据：after-image <b>${num(afterProof)}</b> · ReviewIndex <b>${num(indexProof)}</b> · before-image fallback <b>${num(beforeProof)}</b> · 证据不足 <b>${num(missing)}</b>。<br>
+        ${afterProof ? "新事件直接按 append-only 日志记录的 after-image 校验 freshness；旧事件继续使用兼容证据链。" : (payload.run_index_available ? "旧事件的历史 ReviewIndex 仍可用；按 run sidecar 校验。" : "历史 ReviewIndex 已不可用；旧事件仅 source/coordinate 元数据与完整 before-image 一致时允许撤销。")}`;
       const rows = payload.coordinates || [];
       body.innerHTML = rows.length ? rows.map((item) => `<tr>
         <td><input type="checkbox" data-history-decision="${esc(item.decision_id)}" ${item.revertible ? "" : "disabled"}
@@ -359,7 +369,7 @@
         <td>${historyText(item.after_translation, "无译文")}</td>
         <td>${historyText(item.current_translation, "当前无 TM 行")}
           <div class="muted">${esc(item.current_origin || "—")} · ${esc(item.current_review_state || "—")}</div>
-          ${item.revertible ? `<span class="chip ok">可撤销 · ${item.recovery_proof === "before_image" ? "before-image" : "ReviewIndex"}</span>` : '<span class="chip warn">不可撤销</span>'}
+          ${item.revertible ? `<span class="chip ok">可撤销 · ${esc(recoveryProofLabel(item.recovery_proof))}</span>` : '<span class="chip warn">不可撤销</span>'}
           ${item.conflict_reason ? `<div class="muted">${esc(item.conflict_reason)}</div>` : ""}</td>
       </tr>`).join("") : `<tr><td colspan="7" class="empty">当前筛选没有 coordinate</td></tr>`;
       document.querySelectorAll("[data-history-decision]").forEach((node) => node.addEventListener("change", () => {
