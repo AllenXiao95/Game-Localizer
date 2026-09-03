@@ -14,9 +14,6 @@ from .project_history_detail import (
 )
 from .review_recovery import project_change_history
 
-# Preserve the public/private surface of the historical module. A few tests and
-# internal callers import underscore names (for example ``_DRAIN_MARGIN``), so this
-# is intentionally broader than ``from ... import *``.
 for _name in dir(_impl):
     if not _name.startswith("__"):
         globals()[_name] = getattr(_impl, _name)
@@ -87,17 +84,22 @@ def _dispatch_with_project_history(self, route: str, params: dict) -> None:
         )
         return
     if route == "/api/review/history":
-        self._json(
-            project_change_history(
-                service,
-                action=self._single(params, "action") or "all",
-                status=self._single(params, "status") or "all",
-                run_id=self._single(params, "run_id") or "",
-                query=self._single(params, "q") or "",
-                limit=self._int(params, "limit", 100),
-                offset=self._int(params, "offset", 0),
-            )
+        payload = project_change_history(
+            service,
+            action=self._single(params, "action") or "all",
+            status=self._single(params, "status") or "all",
+            run_id=self._single(params, "run_id") or "",
+            query=self._single(params, "q") or "",
+            limit=self._int(params, "limit", 100),
+            offset=self._int(params, "offset", 0),
         )
+        # Operation list is a summary surface. A single audit may contain thousands
+        # of coordinates; shipping those rows here makes the browser parse/render a
+        # giant payload before the operator has even selected the operation. Detail
+        # is fetched through the paged coordinate endpoint below.
+        for operation in payload.get("operations", []):
+            operation.pop("coordinates", None)
+        self._json(payload)
         return
     self._json(
         project_history_coordinates(
@@ -133,10 +135,6 @@ def _review_post_with_historical_recovery(self, route: str, payload: dict) -> No
     )
 
 
-# DashboardServer builds the request handler from the class object defined in the
-# implementation module. Patch that exact class so every public entrypoint
-# (console script, ``python -m``, tests) uses mandatory Review asset delivery,
-# project-level history, and the same fail-closed revert route for old runs.
 _impl._Handler._static = _static_with_required_recovery
 _impl._Handler._dispatch = _dispatch_with_project_history
 _impl._Handler._review_post = _review_post_with_historical_recovery
