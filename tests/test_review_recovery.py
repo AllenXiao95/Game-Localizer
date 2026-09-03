@@ -16,9 +16,14 @@ if str(ROOT / "tests") not in sys.path:
     sys.path.insert(0, str(ROOT / "tests"))
 
 from localizer.adapters.storage.sqlite_tm import SQLiteTranslationMemory
+from localizer.application.review_log import ReviewDecisionEvent
 from localizer.web.collector import DashboardCollector
 from localizer.web.review import ReviewConflict
-from localizer.web.review_recovery import recovery_operations, safe_revert
+from localizer.web.review_recovery import (
+    project_change_history,
+    recovery_operations,
+    safe_revert,
+)
 from localizer.web.server import DashboardServer
 from test_web_review import _Project
 
@@ -107,6 +112,81 @@ class RecoveryQueryTests(_RecoveryCase):
         self.assertFalse(stale["revertible"])
         self.assertIn("后已有新的", stale["conflict_reason"])
         self.assertEqual("无线电确认：收到！", stale["current_translation"])
+
+
+class ProjectHistoryQueryTests(_RecoveryCase):
+    def test_project_history_spans_runs_and_all_review_actions(self) -> None:
+        _identities, outcome, _payload, _operation, _rows = self._prepare_bad_unify()
+        log = self.service._log()
+        log.append(
+            [
+                ReviewDecisionEvent(
+                    action="skip",
+                    run_id="historical-run",
+                    targets=("old-coordinate",),
+                    reason="旧 run 中的人工跳过",
+                    actor={"name": "tester"},
+                )
+            ],
+            expected_revision=log.revision(),
+        )
+
+        payload = project_change_history(self.service)
+        self.assertEqual("project_review_history", payload["scope"])
+        self.assertIn(self.project.RUN_ID, payload["run_ids"])
+        self.assertIn("historical-run", payload["run_ids"])
+        self.assertTrue(
+            any(
+                item["audit_id"] == outcome.audit_id
+                and item["run_id"] == self.project.RUN_ID
+                and item["action"] == "unify"
+                for item in payload["operations"]
+            )
+        )
+        old = next(
+            item
+            for item in payload["operations"]
+            if item["run_id"] == "historical-run"
+        )
+        self.assertEqual("skip", old["action"])
+        self.assertEqual("recorded", old["status"])
+
+    def test_project_history_can_search_coordinate_context_and_filter_status(self) -> None:
+        identities, outcome, _payload, _operation, _rows = self._prepare_bad_unify()
+
+        by_path = project_change_history(self.service, query="b.mo")
+        operation = next(
+            item for item in by_path["operations"] if item["audit_id"] == outcome.audit_id
+        )
+        self.assertEqual("current", operation["status"])
+        self.assertEqual(3, operation["revertible_count"])
+        self.assertTrue(
+            any(
+                row["stable_identity"] == identities["g2"]
+                and row["before_translation"] == "收到！"
+                and row["current_translation"] == "这就对了！"
+                for row in operation["coordinates"]
+            )
+        )
+
+        self.service.commit(
+            self.project.RUN_ID,
+            {identities["g2"]: "后续上下文修正"},
+            reason="后续人工修正",
+        )
+        mixed = project_change_history(self.service, action="unify", status="mixed")
+        operation = next(
+            item for item in mixed["operations"] if item["audit_id"] == outcome.audit_id
+        )
+        self.assertEqual("mixed", operation["status"])
+        self.assertEqual(2, operation["revertible_count"])
+        stale = next(
+            row
+            for row in operation["coordinates"]
+            if row["stable_identity"] == identities["g2"]
+        )
+        self.assertEqual("superseded", stale["status"])
+        self.assertFalse(stale["revertible"])
 
 
 class SelectiveRevertTests(_RecoveryCase):
@@ -207,14 +287,56 @@ class RecoveryHttpAndGuiTests(_RecoveryCase):
         except urllib.error.HTTPError as exc:
             return exc.code, json.loads(exc.read().decode("utf-8"))
 
-    def test_dashboard_root_contains_the_recovery_function_area(self) -> None:
+    def test_dashboard_root_contains_recovery_and_project_history_function_areas(self) -> None:
         with urllib.request.urlopen(self._url("/"), timeout=10) as response:
             html = response.read().decode("utf-8")
             csp = response.headers.get("Content-Security-Policy", "")
         self.assertIn("变更历史 / Recovery", html)
         self.assertIn('data-rview="recovery"', html)
         self.assertIn("撤销所选坐标", html)
+        self.assertIn("项目状态", html)
+        self.assertIn('data-project-state="history"', html)
+        self.assertIn("查看项目全部变更", html)
+        self.assertIn("Review Change History", html)
         self.assertIn("script-src 'unsafe-inline'", csp)
+
+    def test_http_project_history_exposes_cross_run_review_operations(self) -> None:
+        status, payload = self._get_json("/api/review/history?action=unify")
+        self.assertEqual(200, status)
+        self.assertEqual("project_review_history", payload["scope"])
+        operation = next(
+            item for item in payload["operations"] if item["audit_id"] == self.outcome.audit_id
+        )
+        self.assertEqual(self.project.RUN_ID, operation["run_id"])
+        self.assertEqual("current", operation["status"])
+        self.assertEqual(3, operation["revertible_count"])
+
+    def test_http_project_history_can_drive_existing_safe_revert(self) -> None:
+        run_id = self.project.RUN_ID
+        status, payload = self._get_json("/api/review/history?action=unify")
+        self.assertEqual(200, status)
+        operation = next(
+            item for item in payload["operations"] if item["audit_id"] == self.outcome.audit_id
+        )
+        target = next(
+            item
+            for item in operation["coordinates"]
+            if item["stable_identity"] == self.identities["g2"]
+        )
+        status, result = self._post_json(
+            "/api/review/revert",
+            {
+                "run_id": operation["run_id"],
+                "decision_ids": [target["decision_id"]],
+                "reason": "项目历史选择性恢复",
+                "expected_log_revision": payload["log_revision"],
+            },
+        )
+        self.assertEqual(200, status)
+        self.assertTrue(result["complete"])
+        with SQLiteTranslationMemory(self.project.config.tm.database) as tm:
+            row = tm.rows_for([self.identities["g2"]])[self.identities["g2"]]
+        self.assertEqual("收到！", row["translation"])
 
     def test_http_recovery_can_revert_one_selected_coordinate(self) -> None:
         run_id = self.project.RUN_ID
