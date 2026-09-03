@@ -24,6 +24,7 @@ from localizer.application.review_log import LogRevisionMismatch
 
 from .collector import DashboardCollector
 from .review import ReviewConflict, ReviewService, ReviewUnavailable
+from .review_recovery import recovery_operations, safe_revert
 from .tasks import TaskProfileStore, TaskService
 
 STATIC_ROOT = Path(__file__).resolve().parent / "static"
@@ -166,7 +167,7 @@ class _Handler(BaseHTTPRequestHandler):
             # 而不是我们的 413。1 MiB 的体在开发机上大多能挤进 socket 缓冲区，
             # 所以「看着是好的」，换个慢一点的 runner 就间歇性失败。
             # 有界读走一点再关：守规矩的客户端拿得到 413，
-            # 攻击者也没法让我们把它想让我们读的字节数读完。
+            # 攻击者也没法让我们把它想让我们读的字节数全读完。
             self._drain_bounded(limit)
             self.close_connection = True
             self._json(
@@ -270,6 +271,15 @@ class _Handler(BaseHTTPRequestHandler):
                 self._json(
                     service.decisions(run_id, limit=self._int(params, "limit", 100))
                 )
+            elif view == "recovery":
+                self._json(
+                    recovery_operations(
+                        service,
+                        run_id,
+                        action=self._single(params, "action") or "unify",
+                        limit=self._int(params, "limit", 100),
+                    )
+                )
             else:
                 self._json({"error": "not_found", "message": view},
                            status=HTTPStatus.NOT_FOUND)
@@ -339,9 +349,11 @@ class _Handler(BaseHTTPRequestHandler):
             )
         elif route == "/api/review/revert":
             self._json(
-                service.revert(
+                safe_revert(
+                    service,
                     run_id,
                     list(payload.get("decision_ids") or []),
+                    reason=str(payload.get("reason", "")),
                     expected_log_revision=revision,
                 )
             )
@@ -474,7 +486,23 @@ class _Handler(BaseHTTPRequestHandler):
             self._json({"error": "missing_asset", "message": name},
                        status=HTTPStatus.INTERNAL_SERVER_ERROR)
             return
-        self._send(path.read_bytes(), content_type)
+        body = path.read_bytes()
+        if name == "index.html":
+            # Keep the HTTP response self-contained under the existing inline-only CSP,
+            # while allowing the recovery slice to live in a small separately-tested
+            # source file instead of making the already large dashboard HTML larger.
+            extension = STATIC_ROOT / "review-recovery.js"
+            if extension.is_file():
+                marker = b"</body>"
+                if marker not in body:
+                    self._json(
+                        {"error": "invalid_asset", "message": "index.html has no </body>"},
+                        status=HTTPStatus.INTERNAL_SERVER_ERROR,
+                    )
+                    return
+                script = b"\n<script>\n" + extension.read_bytes() + b"\n</script>\n"
+                body = body.replace(marker, script + marker, 1)
+        self._send(body, content_type)
 
     def _send(self, body: bytes, content_type: str,
               status: HTTPStatus = HTTPStatus.OK) -> None:
