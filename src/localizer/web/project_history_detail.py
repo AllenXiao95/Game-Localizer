@@ -3,16 +3,18 @@ from __future__ import annotations
 from collections import Counter
 from typing import Any, Dict, Mapping, Optional, Sequence
 
-from localizer.adapters.storage.sqlite_tm import SQLiteTranslationMemory
-from localizer.application.review_log import ReviewDecisionEvent
+from localizer.adapters.storage.sqlite_tm import SQLiteTranslationMemory, TMGuardError
+from localizer.application.review_log import LogRevisionMismatch, ReviewDecisionEvent
 
-from .review import ReviewService, ReviewUnavailable
+from .review import ReviewConflict, ReviewService, ReviewUnavailable
 from .review_recovery import (
+    MAX_RECOVERY_ITEMS,
     _RECOVERABLE_ACTIONS,
     _coordinate_value,
     _latest_mutation_by_target,
     _project_coordinate_status,
     _revertibility,
+    safe_revert,
 )
 
 _COORDINATE_STATUSES = {"all", "current", "superseded", "reverted", "recorded"}
@@ -66,19 +68,27 @@ def _before_anchor_payload(
     return {field: current.get(field) for field in fields}
 
 
+def _run_units(service: ReviewService, run_id: str) -> Optional[Mapping[str, Mapping[str, Any]]]:
+    try:
+        return service.index(run_id).units
+    except ReviewUnavailable:
+        return None
+
+
 def recovery_payload_for_event(
-    service: ReviewService,
     event: ReviewDecisionEvent,
     identity: str,
     current: Optional[Mapping[str, Any]],
+    run_units: Optional[Mapping[str, Mapping[str, Any]]],
 ) -> tuple[Optional[Mapping[str, Any]], str]:
-    try:
-        return service.index(event.run_id).units.get(identity), "review_index"
-    except ReviewUnavailable:
-        payload = _before_anchor_payload(event.before.get(identity), current)
+    if run_units is not None:
+        payload = run_units.get(identity)
         if payload is not None:
-            return payload, "before_image"
-        return None, "missing_evidence"
+            return payload, "review_index"
+    payload = _before_anchor_payload(event.before.get(identity), current)
+    if payload is not None:
+        return payload, "before_image"
+    return None, "missing_evidence"
 
 
 def project_history_coordinates(
@@ -115,10 +125,12 @@ def project_history_coordinates(
     identities = list(dict.fromkeys(target for event in events for target in event.targets))
     with SQLiteTranslationMemory(service.config.tm.database) as tm:
         current_rows = tm.rows_for(identities)
+    run_units = _run_units(service, run_id)
 
     rows = []
     status_counts: Counter[str] = Counter()
     proof_counts: Counter[str] = Counter()
+    raw_revertible_count = 0
     for event in events:
         for identity in event.targets:
             before = event.before.get(identity)
@@ -134,7 +146,9 @@ def project_history_coordinates(
             conflict = ""
             proof = "not_applicable"
             if event.action in _RECOVERABLE_ACTIONS and coordinate_status == "current":
-                payload, proof = recovery_payload_for_event(service, event, identity, current)
+                payload, proof = recovery_payload_for_event(
+                    event, identity, current, run_units
+                )
                 if payload is None:
                     conflict = (
                         "历史 ReviewIndex 已不可用，且 before-image 不能证明 source/coordinate 元数据未漂移"
@@ -175,6 +189,8 @@ def project_history_coordinates(
             }
             status_counts[coordinate_status] += 1
             proof_counts[proof] += 1
+            if revertible:
+                raw_revertible_count += 1
             if status != "all" and coordinate_status != status:
                 continue
             if recovery == "revertible" and not revertible:
@@ -216,35 +232,156 @@ def project_history_coordinates(
         "status_counts": dict(status_counts),
         "proof_counts": dict(proof_counts),
         "revertible_total": sum(1 for row in rows if row["revertible"]),
+        "operation_revertible_total": raw_revertible_count,
         "log_revision": service._log().revision(),
+        "run_index_available": run_units is not None,
     }
 
 
-def validate_historical_revert_selection(
+def safe_revert_with_history_fallback(
     service: ReviewService,
     run_id: str,
     decision_ids: Sequence[str],
-) -> Dict[str, Mapping[str, Any]]:
-    """Build strong payload evidence for selected old decisions."""
-    wanted = set(str(item) for item in decision_ids if str(item))
-    events = [event for event in service._log().read_all() if event.decision_id in wanted]
-    if len(events) != len(wanted):
-        raise ValueError("unknown decision id in historical recovery selection")
-    if any(event.run_id != run_id for event in events):
-        raise ValueError("historical recovery selection spans multiple runs")
-    identities = [event.targets[0] for event in events if len(event.targets) == 1]
-    if len(identities) != len(events):
-        raise ValueError("historical recovery requires one coordinate per decision")
-    with SQLiteTranslationMemory(service.config.tm.database) as tm:
-        current_rows = tm.rows_for(identities)
-    payloads: Dict[str, Mapping[str, Any]] = {}
-    for event, identity in zip(events, identities):
-        payload, _proof = recovery_payload_for_event(
-            service, event, identity, current_rows.get(identity)
+    *,
+    reason: str,
+    expected_log_revision: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Use normal safe_revert, then fall back to before-image evidence for old runs.
+
+    The fallback is deliberately narrower than the normal path: every selected event
+    must have a complete before-image whose immutable source/coordinate metadata still
+    matches current TM. Any missing evidence rejects the entire batch before mutation.
+    """
+    try:
+        return safe_revert(
+            service,
+            run_id,
+            decision_ids,
+            reason=reason,
+            expected_log_revision=expected_log_revision,
         )
-        if payload is None:
+    except ReviewUnavailable:
+        pass
+
+    service._assert_writable()
+    wanted = list(dict.fromkeys(str(item) for item in decision_ids if str(item)))
+    if not wanted:
+        raise ValueError("revert requires at least one decision_id")
+    if len(wanted) > MAX_RECOVERY_ITEMS:
+        raise ValueError(
+            f"selective recovery accepts at most {MAX_RECOVERY_ITEMS} decisions per request"
+        )
+    if not reason.strip():
+        raise ValueError("selective recovery requires a non-empty reason")
+
+    log = service._log()
+    revision = log.revision()
+    if expected_log_revision is not None and expected_log_revision != revision:
+        raise LogRevisionMismatch(
+            "review log changed since you read it "
+            f"(expected {expected_log_revision}, now {revision}); reload and retry"
+        )
+
+    all_events = log.read_all()
+    by_id = {event.decision_id: event for event in all_events}
+    missing = [decision_id for decision_id in wanted if decision_id not in by_id]
+    if missing:
+        raise ValueError(f"unknown decision ids: {', '.join(sorted(missing))}")
+    events = [by_id[decision_id] for decision_id in wanted]
+    foreign = [event.decision_id for event in events if event.run_id != run_id]
+    if foreign:
+        raise ValueError(
+            "recovery decisions must belong to the selected run: " + ", ".join(foreign)
+        )
+    unsupported = [
+        event.decision_id for event in events if event.action not in _RECOVERABLE_ACTIONS
+    ]
+    if unsupported:
+        raise ValueError(
+            "selected decisions are not recoverable TM writes: " + ", ".join(unsupported)
+        )
+
+    targets = []
+    event_by_target: Dict[str, ReviewDecisionEvent] = {}
+    for event in events:
+        if len(event.targets) != 1:
             raise ValueError(
-                f"{identity}: historical recovery evidence unavailable; refusing unsafe fallback"
+                f"decision {event.decision_id} does not have a single coordinate target"
             )
-        payloads[identity] = payload
-    return payloads
+        identity = event.targets[0]
+        if identity in event_by_target:
+            raise ValueError(
+                f"multiple selected decisions target {identity}; recover one state transition at a time"
+            )
+        event_by_target[identity] = event
+        targets.append(identity)
+
+    latest_mutation = _latest_mutation_by_target(all_events)
+    with SQLiteTranslationMemory(service.config.tm.database) as tm:
+        current_rows = tm.rows_for(targets)
+        conflicts = []
+        snapshots = []
+        for identity in targets:
+            event = event_by_target[identity]
+            payload = _before_anchor_payload(
+                event.before.get(identity), current_rows.get(identity)
+            )
+            if payload is None:
+                conflicts.append(
+                    (
+                        identity,
+                        "历史 ReviewIndex 已不存在，且 before-image 无法证明当前 source/coordinate 未漂移",
+                    )
+                )
+            else:
+                revertible, conflict = _revertibility(
+                    event=event,
+                    identity=identity,
+                    latest_mutation=latest_mutation,
+                    current_row=current_rows.get(identity),
+                    payload=payload,
+                )
+                if not revertible:
+                    conflicts.append((identity, conflict))
+            snapshots.append(
+                {"stable_identity": identity, "row": event.before.get(identity)}
+            )
+        if conflicts:
+            preview = "; ".join(
+                f"{identity}: {message}" for identity, message in conflicts[:5]
+            )
+            more = "" if len(conflicts) <= 5 else f"；另有 {len(conflicts) - 5} 条"
+            raise ReviewConflict(
+                "选择中存在证据不足或已过期的撤销决策，整批未修改：" + preview + more
+            )
+        try:
+            restored = tm.restore_rows(snapshots)
+        except TMGuardError as exc:
+            raise ReviewConflict(str(exc)) from exc
+
+    event = ReviewDecisionEvent(
+        action="revert",
+        run_id=run_id,
+        targets=tuple(targets),
+        reason=reason,
+        details={
+            "reverted_decision_ids": wanted,
+            "recovery_mode": "selective_coordinate_historical_before_image",
+        },
+        actor=service._actor(),
+    )
+    revision = log.append([event], expected_revision=revision)
+    ledger = service.ledger(run_id)
+    for identity in targets:
+        ledger.mark(identity, "reverted", decision_id=event.decision_id)
+    service._ledger_path(run_id).parent.mkdir(parents=True, exist_ok=True)
+    ledger.save()
+    return {
+        "complete": True,
+        "restored": restored,
+        "targets": targets,
+        "reverted_decision_ids": wanted,
+        "decision_id": event.decision_id,
+        "log_revision": revision,
+        "recovery_proof": "before_image",
+    }
