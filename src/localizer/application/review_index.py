@@ -163,6 +163,8 @@ class ReviewIndexWriter:
                         {
                             "stable_identity": unit.stable_identity,
                             "relative_path": unit.relative_path,
+                            "logical_key": unit.logical_key,
+                            "context": unit.context,
                             "translation": text,
                         }
                     )
@@ -214,6 +216,7 @@ class ReviewIndexWriter:
             units_payload[identity] = {
                 "relative_path": unit.relative_path,
                 "logical_key": unit.logical_key,
+                "context": unit.context,
                 "adapter_id": unit.adapter_id,
                 "source_text": unit.source_text,
                 "source_fingerprint": unit.source_fingerprint,
