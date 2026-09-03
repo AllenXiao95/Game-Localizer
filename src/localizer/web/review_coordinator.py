@@ -1,16 +1,19 @@
 """Review mutation coordination at the local Dashboard boundary.
 
-The legacy :class:`ReviewService` owns validation/business semantics. This module
-adds only two cross-cutting guarantees that became necessary once Recovery grew:
+The legacy :class:`ReviewService` owns the baseline validation/business semantics.
+This module adds three production-boundary guarantees that need the current TM
+snapshot under one process-local lock:
 
-1. every Dashboard Review mutation shares the same process-local maintenance RLock
-   as task submission / TM maintenance, so ``check -> TM -> decision log`` cannot be
+1. every Dashboard Review mutation shares the same maintenance RLock as task
+   submission / TM maintenance, so ``check -> TM -> decision log`` cannot be
    interleaved by another Dashboard write;
-2. newly appended TM-mutation decisions carry a complete ``after`` row snapshot.
+2. newly appended TM-mutation decisions carry a complete ``after`` row snapshot;
+3. same-source ``unify`` fails closed before overwriting an existing divergent
+   Review-owned human finalization.
 
-It deliberately does not add a second audit store or duplicate commit/unify rules.
-Old ReviewService callers remain compatible; production Dashboard services use the
-coordinated subclass.
+It deliberately does not add a second audit store, override workflow, or duplicate
+commit/unify implementations. Old ReviewService callers remain compatible;
+production Dashboard services use the coordinated subclass.
 """
 from __future__ import annotations
 
@@ -78,7 +81,7 @@ class SnapshottingReviewDecisionLog(ReviewDecisionLog):
 
 
 class CoordinatedReviewService(ReviewService):
-    """ReviewService with one explicit mutation critical section.
+    """ReviewService with one explicit production mutation critical section.
 
     ``RLock`` is intentional: ``unify_majorities`` enters the outer guard and then
     calls ``self.commit()``, which re-enters the same lock. The Dashboard passes the
@@ -111,18 +114,47 @@ class CoordinatedReviewService(ReviewService):
         return True
 
     def commit(self, run_id: str, edits: Mapping[str, str], **kwargs):
-        """Serialize commit and compensate the narrow optimistic-race failure.
+        """Serialize Review writes and keep same-source convenience actions conservative.
 
         Under the shared lock, a local Dashboard writer cannot change the Review log
         revision between TM write and log append. If a non-coordinated/external writer
         still causes ``LogRevisionMismatch``, compensation only touches coordinates
         that (a) differ from their captured before-image and (b) still exactly match
-        this commit's intended fixed human-write shape. Anything else fails closed
-        rather than overwriting a possible newer external state.
+        this commit's intended fixed human-write shape. Anything else fails closed.
+
+        ``unify`` has one additional KISS guard: if any target already contains a
+        different local ``human + reviewed + formal`` value, reject the whole unify
+        before writing anything. There is deliberately no override flag in this slice.
         """
         with self._mutation_lock:
             with SQLiteTranslationMemory(self.config.tm.database) as tm:
                 before = tm.rows_for(list(edits))
+
+            if kwargs.get("action") == "unify":
+                divergent = [
+                    identity
+                    for identity, translation in edits.items()
+                    if (row := before.get(identity)) is not None
+                    and row.get("origin") == "human"
+                    and row.get("review_state") == "reviewed"
+                    and bool(row.get("is_formal"))
+                    and row.get("translation") != translation
+                ]
+                if divergent:
+                    labels = []
+                    for identity in divergent[:10]:
+                        row = before[identity]
+                        path = str(row.get("relative_path") or "")
+                        key = str(row.get("logical_key") or identity)
+                        labels.append(f"{path}:{key}" if path else key)
+                    more = "" if len(divergent) <= 10 else f" 等 {len(divergent)} 条"
+                    raise ReviewConflict(
+                        "同源统一会覆盖已有且译文不同的人工定稿；已拒绝整个操作。"
+                        "请逐条确认或保留该语境译法："
+                        + ", ".join(labels)
+                        + more
+                    )
+
             try:
                 return super().commit(run_id, edits, **kwargs)
             except LogRevisionMismatch:
