@@ -59,6 +59,17 @@ localizer rebuild-from-run projects/my-project/project.yaml `
 
 Add `--version` when the game/resource version changed. Source fingerprints are checked; changed source text is never reused from the parent.
 
+To converge a reviewed parent run directly into a formal build, use the same rebuild path in release mode:
+
+```powershell
+localizer rebuild-from-run projects/my-project/project.yaml `
+  --parent-run-id preview-002 `
+  --run-id release-001 `
+  --mode release
+```
+
+A release rebuild safely reuses successful parent-checkpoint results whose source is still identical and sends only unresolved work to the Provider. A zero-Provider release is valid when every required translation is reusable. The full QualityGate still runs. After it passes, eligible machine translations actually used by the release—including safely reused parent-checkpoint machine results—must enter the formal TM baseline for the next incremental plan. Preview rebuilds do not perform this authority transition.
+
 ## 6. Release build
 
 ```powershell
@@ -67,7 +78,7 @@ localizer build projects/my-project/project.yaml `
   --run-id release-001
 ```
 
-A release enforces the QualityGate: new errors must be zero, and a legacy-debt baseline only permits explicitly registered existing issues. A successful build creates an archive and manifest. Treat the manifest—not the ZIP filename—as the source for hashes, version, mode, QA status, and build metadata.
+A release enforces the QualityGate: new errors must be zero, and a legacy-debt baseline only permits explicitly registered existing issues. A successful build creates an archive and manifest and makes eligible machine translations that gain authority in this release part of the formal TM baseline for the next plan. Treat the manifest—not the ZIP filename—as the source for hashes, version, mode, QA status, and build metadata.
 
 ## 7. Publish
 
