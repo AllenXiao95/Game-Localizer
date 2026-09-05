@@ -58,6 +58,17 @@ Test-Path var\my-project\localizer.sqlite
 - Dashboard 的人工定稿会写入带审计信息的正式记录，且优先级高于机器结果。
 - 旧 JSON 导入的记录先以 legacy 分类进入 SQLite，是否可复用取决于分类、审核状态和 `global_exact_match` 策略。
 
+### Release 基线连续性
+
+一次成功的 `release` 不只是生成正式制品，也会完成本轮新增机器译文的 authority transition。对本次 release 实际采用、且符合提交策略的机器译文：
+
+- 当前运行新调用 Provider 生成的机器译文，在完整 QualityGate 通过后可以晋升为正式 TM；
+- `rebuild-from-run --mode release` 安全复用的父 checkpoint 机器译文，如果实际进入本次 release，也必须在同一个 QualityGate 通过后进入本次正式 TM 基线；
+- 已经是正式/人工审核 TM 命中的记录保持原有 authority，不需要因为被 release 使用而重新晋升；
+- `preview` 和 `preview rebuild` 仍然只产生候选与运行证据，不会因为复用了 checkpoint 就获得正式 authority。
+
+因此，对相同 source/config，在一次成功 release 后立即重新规划时，本次 release 新获得 authority 的 eligible machine translations 不应再次作为 Provider `pending` 工作出现。若制品已经正式可发布，而同一批译文在 TM 中仍是 non-formal 并导致下一轮重译，应视为 release artifact 与 TM baseline 的一致性缺陷，而不是正常缓存未命中。
+
 ## 旧 JSON TM 转 SQLite
 
 如果手里没有旧 TM JSON、只有已经汉化的资源文件，请使用[从存量汉化资源构建 TM](tm-bootstrap.md)中的资源 bootstrap 或中立 TM Seed 流程。本节命令只针对旧脚本的兼容 TM 格式。

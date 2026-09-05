@@ -82,6 +82,17 @@ localizer rebuild-from-run projects/my-project/project.yaml `
 
 如果游戏版本也发生变化，可增加 `--version`。系统会核对源文指纹；源文已改变的记录不会被错误复用。
 
+需要把已经修订好的父运行直接收敛为正式版本时，可以同样使用 release rebuild：
+
+```powershell
+localizer rebuild-from-run projects/my-project/project.yaml `
+  --parent-run-id preview-002 `
+  --run-id release-001 `
+  --mode release
+```
+
+release rebuild 会安全复用父 checkpoint 中源文仍一致的成功结果，只把真正未解决的条目送给 Provider；即使全部条目都可复用、因此本轮 Provider 请求为 0，也属于正常路径。它仍然执行完整 QualityGate。Gate 通过后，本次 release 实际采用且符合提交策略的机器译文（包括安全复用的父 checkpoint 机器结果）必须进入正式 TM 基线，供下一轮增量规划复用。preview rebuild 不会产生这种正式晋升。
+
 ## 6. 构建正式制品
 
 ```powershell
@@ -90,7 +101,7 @@ localizer build projects/my-project/project.yaml `
   --run-id release-001
 ```
 
-`release` 与 `preview` 的关键区别是质量闸门：本次新增的 error 必须为零；配置了历史债务基线时，只允许已登记的存量问题继续存在。通过后会生成压缩包和 manifest。
+`release` 与 `preview` 的关键区别是质量闸门：本次新增的 error 必须为零；配置了历史债务基线时，只允许已登记的存量问题继续存在。通过后会生成压缩包和 manifest，并使本次 release 新获得 authority 的 eligible machine translations 成为下一轮可复用的正式 TM 基线。
 
 manifest 是发布和回读验证的入口，包含内容哈希、版本、模式、QA 状态和构建元数据。不要仅凭 zip 文件名判断制品是否可发布。
 

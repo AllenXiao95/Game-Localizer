@@ -98,6 +98,21 @@ TM 不负责：
 
 资源更新后的正常路径是：重新由 Adapter 投影当前资源，比较 stable coordinate 与 source fingerprint，通过 TM 决定复用、stale 或重译，再走正常 render/build。
 
+### 4.1 Release baseline continuity
+
+成功的 `release` 同时产生制品 authority 和下一轮增量翻译所依赖的 TM baseline authority。两者不得分叉。
+
+凡是本次 release 实际采用、且在本轮新获得 authority 的 eligible machine translation——无论来自当前 Provider 调用，还是来自 release rebuild 安全复用的 parent checkpoint——都必须在完整 QualityGate 通过后进入一致的 formal TM baseline。已经 formal/reviewed 的 TM 命中保持原有 authority；preview 路径不得获得这种晋升。
+
+因此下面的状态组合属于 correctness violation：
+
+```text
+Artifact = formal / publishable
+TM       = non-formal / same translations become pending again
+```
+
+Release continuity 应通过回归测试证明：对相同 source/config，成功 release 后的 fresh plan 不会再次请求本次 release 刚获得 authority 的机器译文。
+
 ## 5. Application services 的权威
 
 ProjectRunner、TranslationPlanner、QA / QualityGate、Review、Build、Artifact、Publish 等 Python application services 负责确定性工作流和治理边界。
