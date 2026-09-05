@@ -7,14 +7,15 @@ Usage (from the repository root after installing the branch):
 
 The verifier:
 
-1. reads the selected run's WebUI source/version snapshot when available;
-2. makes a SQLite backup into a temporary sandbox using the backup API;
-3. copies only the selected parent run workspace into that sandbox;
-4. forces artifact encryption off in the sandbox;
-5. refuses to continue if the rebuild would require any Provider request;
-6. performs a release rebuild with a Provider implementation that raises if called;
-7. runs a fresh translation plan and verifies reused machine translations became TM hits;
-8. removes the sandbox automatically unless --keep is supplied.
+1. reads and reports the selected run's WebUI mode/kind/lineage when available;
+2. reads the production TM only for diagnostic counts;
+3. makes a SQLite backup into a temporary sandbox using the backup API;
+4. copies only the selected parent run workspace into that sandbox;
+5. forces artifact encryption off in the sandbox;
+6. refuses to continue if the rebuild would require any Provider request;
+7. performs a release rebuild with a Provider implementation that raises if called;
+8. runs a fresh translation plan and verifies reused machine translations became TM hits;
+9. removes the sandbox automatically unless --keep is supplied.
 
 Production TM, workspace, output and published artifacts are never written.
 """
@@ -30,6 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from localizer.adapters.storage.sqlite_tm import SQLiteTranslationMemory
+from localizer.application.batch_orchestrator import JsonCheckpoint
 from localizer.application.local_build import BuildMode
 from localizer.application.project_runner import ProjectRunner
 from localizer.config import load_project_config
@@ -57,6 +59,42 @@ def _validate_config(data: dict[str, Any]) -> ProjectConfig:
     if hasattr(ProjectConfig, "model_validate"):
         return ProjectConfig.model_validate(data)
     return ProjectConfig.parse_obj(data)
+
+
+def _run_metadata(parent_path: Path) -> dict[str, Any]:
+    """Read enough immutable run evidence to distinguish direct release from rebuild."""
+    request_path = parent_path / "task-request.json"
+    request: dict[str, Any] = {}
+    if request_path.is_file():
+        payload = json.loads(request_path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise RuntimeError(f"invalid task snapshot: {request_path}")
+        request = payload
+
+    lineage_path = parent_path / ProjectRunner.LINEAGE_FILENAME
+    lineage: dict[str, Any] = {}
+    if lineage_path.is_file():
+        payload = json.loads(lineage_path.read_text(encoding="utf-8"))
+        if isinstance(payload, dict):
+            lineage = payload
+
+    parent = str(
+        request.get("parent_run_id")
+        or lineage.get("parent_run_id")
+        or ""
+    ).strip()
+    kind = str(request.get("kind") or ("rebuild" if parent else "run")).strip()
+    return {
+        "kind": kind,
+        "mode": str(request.get("mode") or "").strip() or None,
+        "status": str(request.get("status") or "").strip() or None,
+        "parent_run_id": parent or None,
+        "reuse_checkpoint_run_id": (
+            str(lineage.get("reuse_checkpoint_run_id") or "").strip() or None
+        ),
+        "has_task_request": request_path.is_file(),
+        "has_run_lineage": lineage_path.is_file(),
+    }
 
 
 def _task_config(base: ProjectConfig, parent_path: Path) -> ProjectConfig:
@@ -94,7 +132,7 @@ def _sandbox_config(live: ProjectConfig, root: Path) -> ProjectConfig:
     data["paths"]["workspace"] = root / "workspace"
     data["paths"]["output"] = root / "output"
     data["tm"]["database"] = root / "tm.sqlite3"
-    # The verification is about TM authority, not archive encryption.  Never require or
+    # The verification is about TM authority, not archive encryption. Never require or
     # read the production package password for this disposable release artifact.
     data["build"]["encryption"] = "none"
     data["build"].pop("password_env", None)
@@ -116,18 +154,53 @@ def _backup_sqlite(source: Path, destination: Path) -> None:
         src.close()
 
 
+def _production_tm_diagnostics(
+    live: ProjectConfig,
+    parent_run_id: str,
+    checkpoint: JsonCheckpoint,
+) -> dict[str, int]:
+    """Read-only evidence: did the selected run already become formal in production TM?"""
+    succeeded = tuple(
+        identity
+        for identity, row in checkpoint.units.items()
+        if row.get("state") == "succeeded"
+    )
+    with SQLiteTranslationMemory(live.tm.database, read_only=True) as tm:
+        rows = tm.rows_for(succeeded)
+    return {
+        "checkpoint_succeeded": len(succeeded),
+        "rows_present": len(rows),
+        "formal_rows": sum(1 for row in rows.values() if bool(row.get("is_formal"))),
+        "rows_attributed_to_selected_run": sum(
+            1 for row in rows.values() if row.get("run_id") == parent_run_id
+        ),
+        "formal_rows_attributed_to_selected_run": sum(
+            1
+            for row in rows.values()
+            if bool(row.get("is_formal")) and row.get("run_id") == parent_run_id
+        ),
+    }
+
+
 def _verify(config_path: Path, parent_run_id: str, variant: str | None, root: Path) -> dict:
     base = load_project_config(config_path).for_variant(variant)
     original_parent = Path(base.paths.workspace) / "runs" / parent_run_id
     if not original_parent.is_dir():
         raise FileNotFoundError(f"parent run does not exist: {original_parent}")
-    if not (original_parent / "checkpoint.json").is_file():
+    checkpoint_path = original_parent / "checkpoint.json"
+    if not checkpoint_path.is_file():
         raise RuntimeError(
             "selected parent has no checkpoint.json; choose the materialized run that "
             "contains the translations you want to verify"
         )
 
+    run_metadata = _run_metadata(original_parent)
     live = _task_config(base, original_parent)
+    production_checkpoint = JsonCheckpoint(checkpoint_path)
+    production_tm = _production_tm_diagnostics(
+        live, parent_run_id, production_checkpoint
+    )
+
     sandbox = _sandbox_config(live, root)
     _backup_sqlite(Path(live.tm.database), Path(sandbox.tm.database))
 
@@ -147,7 +220,7 @@ def _verify(config_path: Path, parent_run_id: str, variant: str | None, root: Pa
         before,
     )
 
-    # Hard safety boundary: the verifier is allowed to test reuse only.  It must never
+    # Hard safety boundary: the verifier is allowed to test reuse only. It must never
     # turn into an accidental paid translation run on real source material.
     if rebuild.retry:
         raise RuntimeError(
@@ -186,6 +259,8 @@ def _verify(config_path: Path, parent_run_id: str, variant: str | None, root: Pa
     result = {
         "sandbox": str(root),
         "parent_run_id": parent_run_id,
+        "affected_run": run_metadata,
+        "production_tm_read_only": production_tm,
         "verification_release_run_id": run_id,
         "before": {
             "extracted_units": before.extracted_units,
