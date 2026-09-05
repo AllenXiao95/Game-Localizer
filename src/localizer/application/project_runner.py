@@ -387,6 +387,33 @@ class ProjectRunner:
             )
         )
 
+    def _machine_candidate_entry(
+        self, unit: TranslationUnit, translation: str, run_id: str
+    ) -> TMEntry:
+        """Build the single canonical SQLite shape for a machine candidate.
+
+        Provider output and checkpoint reuse must land through exactly the same guarded
+        TM write path.  Duplicating this field set would let the two release paths drift
+        and recreate the split-brain state fixed by #55.
+        """
+        return TMEntry(
+            stable_identity=unit.stable_identity,
+            project_id=unit.project_id,
+            adapter_id=unit.adapter_id,
+            relative_path=unit.relative_path,
+            logical_key=unit.logical_key,
+            source_text=unit.source_text,
+            source_fingerprint=unit.source_fingerprint,
+            translation=translation,
+            origin="machine",
+            review_state="unreviewed",
+            match_scope="coordinate_exact",
+            run_id=run_id,
+            model=self.config.provider.model,
+            quality_state="passed",
+            is_formal=False,
+        )
+
     def run(
         self,
         *,
@@ -415,6 +442,9 @@ class ProjectRunner:
         # 会从真正的 Provider pending 中移除一部分，但这些结果仍必须物化进子
         # checkpoint，否则下一代无法以这个最新子运行为父运行。
         checkpoint_candidates = tuple(active_plan.pending)
+        checkpoint_candidate_by_identity = {
+            unit.stable_identity: unit for unit in checkpoint_candidates
+        }
         pending = list(checkpoint_candidates)
         if rebuild is not None and rebuild.reused:
             # 复用的译文是父运行**这一轮**产出的机器译文，provenance 仍是
@@ -487,9 +517,33 @@ class ProjectRunner:
                 checkpoint.flush_now()
 
         with SQLiteTranslationMemory(self.config.tm.database) as tm:
+            # `machine_success_ids` remains an execution metric: it counts only Provider
+            # successes generated in this run.  Promotion is a different concern, because a
+            # release rebuild may ship zero-new-work translations safely reused from a parent.
             machine_success_ids = []
+            promotable_machine_ids = []
+            staged = []
             failed_ids = []
             root_causes: Dict[str, Dict[str, object]] = {}
+
+            # #55: a release artifact is authoritative only if the machine translations it
+            # actually ships can become the next formal TM baseline.  Reused preview
+            # candidates therefore get re-attributed to this *release* run through the same
+            # guarded upsert path as fresh Provider output.  Preview rebuilds deliberately do
+            # not do this; they remain non-authoritative candidates.
+            if mode is BuildMode.RELEASE and rebuild is not None and rebuild.reused:
+                for identity, translation in rebuild.reused.items():
+                    unit = checkpoint_candidate_by_identity.get(identity)
+                    if unit is None:
+                        raise IncompatibleParentRun(
+                            "rebuild reuse contains an identity outside the active pending plan: "
+                            f"{identity}"
+                        )
+                    staged.append(
+                        self._machine_candidate_entry(unit, translation, run_id)
+                    )
+                    promotable_machine_ids.append(identity)
+
             if pending:
                 prompt = self.config.prompt.template.read_text(encoding="utf-8")
                 background = (
@@ -515,7 +569,6 @@ class ProjectRunner:
                 ]
                 resource_groups = [item for item in resource_groups if item[1]]
                 by_identity = {unit.stable_identity: unit for unit in pending}
-                staged = []
                 worker_count = min(
                     self.config.provider.concurrency, len(resource_groups)
                 )
@@ -595,23 +648,10 @@ class ProjectRunner:
                             # 本次运行自己产出的译文：QualityGate 对它零容忍。
                             provenance[result.stable_identity] = PROVENANCE_THIS_RUN
                             machine_success_ids.append(result.stable_identity)
+                            promotable_machine_ids.append(result.stable_identity)
                             staged.append(
-                                TMEntry(
-                                    stable_identity=unit.stable_identity,
-                                    project_id=unit.project_id,
-                                    adapter_id=unit.adapter_id,
-                                    relative_path=unit.relative_path,
-                                    logical_key=unit.logical_key,
-                                    source_text=unit.source_text,
-                                    source_fingerprint=unit.source_fingerprint,
-                                    translation=result.translation,
-                                    origin="machine",
-                                    review_state="unreviewed",
-                                    match_scope="coordinate_exact",
-                                    run_id=run_id,
-                                    model=self.config.provider.model,
-                                    quality_state="passed",
-                                    is_formal=False,
+                                self._machine_candidate_entry(
+                                    unit, result.translation, run_id
                                 )
                             )
                         else:
@@ -631,29 +671,34 @@ class ProjectRunner:
                                     for issue in result.issues
                                 ],
                             }
-                rejected = tm.upsert_many(staged)
-                if rejected:
-                    # 这些坐标在 TM 里已是 formal，但源文指纹与本次不符，
-                    # 于是 upsert 的 WHERE 把写入**静默挡下**（零异常、零 rowcount
-                    # 信号）。原来这件事要一直拖到 render 之后的
-                    # `validate_promotable_run` 才炸「cannot promote entries absent
-                    # from the requested run」—— 那时制品已经渲染完，而同 run_id
-                    # 又不许重试，整轮白跑。把失败点提到 render 之前。
-                    preview = ", ".join(sorted(rejected)[:10])
-                    more = f"（另有 {len(rejected) - 10} 条）" if len(rejected) > 10 else ""
-                    variant_hint = (
-                        f" --variant {self.config.active_variant}"
-                        if self.config.active_variant
-                        else ""
-                    )
-                    raise StaleFormalEntryError(
-                        f"{len(rejected)} 个坐标在 TM 里已是 formal，但源文已经变了，"
-                        f"本次翻译结果无法写入：{preview}{more}\n"
-                        f"这些是上一轮 release 晋升过、之后源文又被改动的条目。"
-                        f"先用 `localizer review-retire --stale <config>"
-                        f"{variant_hint}` 预览，再加 `--apply` 清理后恢复同一 run_id。",
-                        rejected,
-                    )
+
+            # Run all machine candidates through the existing physical TM guards in one
+            # transaction.  This is intentionally outside `if pending`: a zero-Provider
+            # release rebuild still has reused candidates that must be attributable to the
+            # current release before QualityGate is allowed to promote them.
+            rejected = tm.upsert_many(staged)
+            if rejected:
+                # 这些坐标在 TM 里已是 formal，但源文指纹与本次不符，
+                # 于是 upsert 的 WHERE 把写入**静默挡下**（零异常、零 rowcount
+                # 信号）。原来这件事要一直拖到 render 之后的
+                # `validate_promotable_run` 才炸「cannot promote entries absent
+                # from the requested run」—— 那时制品已经渲染完，而同 run_id
+                # 又不许重试，整轮白跑。把失败点提到 render 之前。
+                preview = ", ".join(sorted(rejected)[:10])
+                more = f"（另有 {len(rejected) - 10} 条）" if len(rejected) > 10 else ""
+                variant_hint = (
+                    f" --variant {self.config.active_variant}"
+                    if self.config.active_variant
+                    else ""
+                )
+                raise StaleFormalEntryError(
+                    f"{len(rejected)} 个坐标在 TM 里已是 formal，但源文已经变了，"
+                    f"本次翻译结果无法写入：{preview}{more}\n"
+                    f"这些是上一轮 release 晋升过、之后源文又被改动的条目。"
+                    f"先用 `localizer review-retire --stale <config>"
+                    f"{variant_hint}` 预览，再加 `--apply` 清理后恢复同一 run_id。",
+                    rejected,
+                )
 
             lineage = self._run_lineage(rebuild.parent_run_id) if rebuild else ()
             current_metrics = (
@@ -728,7 +773,7 @@ class ProjectRunner:
                 unit_root_causes=root_causes,
                 filtered_identities=tuple(active_plan.filtered),
                 tm=tm,
-                formal_tm_identities=machine_success_ids,
+                formal_tm_identities=promotable_machine_ids,
                 manifest_metadata={
                     **self._manifest_metadata(resources, tm),
                     # Backward-compatible public summary: requests/tokens now describe the
