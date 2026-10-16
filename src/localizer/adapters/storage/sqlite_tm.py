@@ -441,7 +441,14 @@ class SQLiteTranslationMemory:
         with self.transaction() as connection:
             # Reuse the exact preview predicate *inside* the write transaction;
             # a reusable historical source must never be retired.
-            eligible = set(self.stale_formal_identities(tuple(candidates.values())))
+            # Retirement arguments describe the *requested source*, not the
+            # authority of the current stored row. Callers may pass a future
+            # formal TMEntry (existing API/tests); normalize only for the
+            # eligibility query, keeping the preflight predicate unchanged.
+            requested = tuple(
+                replace(entry, is_formal=False) for entry in candidates.values()
+            )
+            eligible = set(self.stale_formal_identities(requested))
             if expected is not None and eligible != expected:
                 raise RuntimeError(
                     "stale formal candidates changed during retirement: "
