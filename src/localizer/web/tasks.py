@@ -330,22 +330,41 @@ class TaskService:
                     "configuration changed; run preflight again"
                 )
             preview = self._stale_formal_preview(config, plan)
-            expected = set(
-                (previous.get("confirmation") or {}).get("identities") or ()
-            ) if run_id else set(
-                (preflight.get("stale_formal") or {}).get("identities") or ()
+            confirmation = (
+                previous.get("confirmation") or {}
+                if run_id
+                else preflight.get("stale_formal") or {}
             )
+            expected = set(confirmation.get("identities") or ())
             actual = set(preview["identities"])
-            if expected and actual != expected:
+            # Even an empty expected set must not authorize newly observed rows.
+            if actual != expected:
                 raise ValueError("stale formal candidates changed; inspect and confirm again")
+
+            approved_rows = {
+                item["stable_identity"]: item["old_row_token"]
+                for item in confirmation.get("entries") or ()
+                if item.get("stable_identity") and item.get("old_row_token")
+            }
+            if set(approved_rows) != expected:
+                raise ValueError(
+                    "stale formal confirmation has no complete TM row snapshot; "
+                    "run a new preflight and confirm again"
+                )
 
             backup_path = None
             removed = 0
             if actual:
+                approved_entries = [
+                    entry for entry in self._plan_entries(plan)
+                    if entry.stable_identity in actual
+                ]
                 backup_path = self._backup_tm(config, run_id or preflight_id)
                 with SQLiteTranslationMemory(config.tm.database) as tm:
                     removed = tm.retire_stale_formal_entries(
-                        self._plan_entries(plan), expected_identities=actual
+                        approved_entries,
+                        expected_identities=actual,
+                        expected_rows=approved_rows,
                     )
 
             audit = {
@@ -463,6 +482,7 @@ class TaskService:
                     "old_source": old.get("source_text"),
                     "new_source": new.source_text,
                     "old_translation": old.get("translation"),
+                    "old_row_token": SQLiteTranslationMemory.row_revision_token(old),
                 }
             )
         return {
