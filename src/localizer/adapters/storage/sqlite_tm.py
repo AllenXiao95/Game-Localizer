@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
-from typing import Iterable, Iterator, Optional, Sequence, Tuple
+from typing import Iterable, Iterator, Mapping, Optional, Sequence, Tuple
 
 
 SCHEMA_VERSION = 2
@@ -391,55 +392,90 @@ class SQLiteTranslationMemory:
             )
             return cursor.rowcount
 
+    @staticmethod
+    def row_revision_token(row: Mapping[str, object]) -> str:
+        """Stable token for a full TM row before-image, independent of column order."""
+        encoded = json.dumps(
+            dict(row), sort_keys=True, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")
+        return sha256(encoded).hexdigest()
+
     def retire_stale_formal_entries(
         self,
         entries: Sequence[TMEntry],
         *,
         expected_identities: Optional[Sequence[str]] = None,
+        expected_rows: Optional[Mapping[str, str]] = None,
     ) -> int:
-        """归档并删除源文指纹已变化的 formal，让当前资源接管坐标。
+        """Retire only genuinely stale formal rows, archiving exact source history.
 
-        调用方必须先向操作者展示候选并取得明确确认。删除条件在同一事务里
-        重新校验 ``is_formal`` 和旧指纹，避免预览后 TM 发生变化时误删新结果。
-
-        旧 formal 会按 ``(stable_identity, source_fingerprint)`` 保存到精确历史层。
-        这样正式服/测试服或其他并行源在同一坐标上往返时，回到旧源文可以直接
-        命中当时已经验证过的译文，而不是把“最后执行的源”误当成唯一基线。
+        The same historical-exact eligibility rule as preflight is rechecked
+        under BEGIN IMMEDIATE. Dashboard confirmations can additionally bind
+        each approved identity to the complete preflight row before-image.
+        A mismatch rolls back both the source-history archive and the deletion.
         """
-        candidates = {
-            entry.stable_identity: entry.source_fingerprint
-            for entry in entries
-            if entry.stable_identity and entry.source_fingerprint
-        }
-        if not candidates:
-            return 0
-        removed = 0
+        candidates: dict[str, TMEntry] = {}
+        for entry in entries:
+            if not entry.stable_identity or not entry.source_fingerprint:
+                continue
+            previous = candidates.get(entry.stable_identity)
+            if (
+                previous is not None
+                and previous.source_fingerprint != entry.source_fingerprint
+            ):
+                raise TMGuardError(
+                    f"conflicting source fingerprints for {entry.stable_identity}"
+                )
+            candidates[entry.stable_identity] = entry
+
+        expected = (
+            {str(value) for value in expected_identities if value}
+            if expected_identities is not None
+            else None
+        )
+        if expected_rows is not None:
+            if expected is None or set(expected_rows) != expected:
+                raise TMGuardError("stale formal before-images do not match approved identities")
+
         now = datetime.now(timezone.utc).isoformat()
         with self.transaction() as connection:
-            for identity, current_fingerprint in candidates.items():
-                row = connection.execute(
-                    "SELECT * FROM tm_entries WHERE stable_identity = ? "
-                    "AND is_formal = 1 AND source_fingerprint <> ?",
-                    (identity, current_fingerprint),
-                ).fetchone()
+            # Reuse the exact preview predicate *inside* the write transaction;
+            # a reusable historical source must never be retired.
+            eligible = set(self.stale_formal_identities(tuple(candidates.values())))
+            if expected is not None and eligible != expected:
+                raise RuntimeError(
+                    "stale formal candidates changed during retirement: "
+                    f"eligible {len(eligible)}/{len(expected)}; transaction rolled back"
+                )
+
+            rows = self.rows_for(sorted(eligible))
+            for identity in sorted(eligible):
+                row = rows.get(identity)
                 if row is None:
-                    continue
+                    raise RuntimeError(
+                        f"stale formal row disappeared: {identity}; transaction rolled back"
+                    )
+                if expected_rows is not None and (
+                    self.row_revision_token(row) != expected_rows[identity]
+                ):
+                    raise RuntimeError(
+                        f"stale formal row changed since confirmation: {identity}; "
+                        "transaction rolled back; run preflight again"
+                    )
+
                 self._archive_formal_row(connection, row, now)
                 cursor = connection.execute(
                     "DELETE FROM tm_entries "
                     "WHERE stable_identity = ? AND is_formal = 1 "
-                    "AND source_fingerprint <> ?",
-                    (identity, current_fingerprint),
+                    "AND source_fingerprint = ?",
+                    (identity, row["source_fingerprint"]),
                 )
-                removed += cursor.rowcount
-            if expected_identities is not None:
-                expected = {str(value) for value in expected_identities if value}
-                if removed != len(expected):
+                if cursor.rowcount != 1:
                     raise RuntimeError(
-                        f"stale formal candidates changed during retirement: "
-                        f"removed {removed}/{len(expected)}; transaction rolled back"
+                        f"stale formal row changed during retirement: {identity}; "
+                        "transaction rolled back"
                     )
-        return removed
+            return len(eligible)
 
     def restore_rows(self, snapshots: Sequence[dict]) -> int:
         """撤销专用：按前像还原。快照的 `row` 为 None 表示当时这个坐标没有行。
