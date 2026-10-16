@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from localizer.adapters.storage.sqlite_tm import SQLiteTranslationMemory, TMEntry
@@ -124,6 +125,146 @@ class TMSourceHistoryTests(unittest.TestCase):
 
             self.assertEqual((ru_1441_changed.stable_identity,), stale)
             self.assertIsNone(missing)
+
+
+    def test_retirement_excludes_exact_history_even_with_full_plan_entries(self) -> None:
+        """One new source is stale; a sibling branch returning to history is not."""
+        with tempfile.TemporaryDirectory() as temp:
+            with SQLiteTranslationMemory(Path(temp) / "tm.sqlite") as tm:
+                old_a = self._entry("a-old", "A old", run_id="a-old")
+                new_a = self._entry("a-new", "", run_id="a-new", formal=False)
+                old_b = replace(
+                    self._entry("b-old", "B old", run_id="b-old"),
+                    stable_identity="demo:gettext:ui/menu.po:other",
+                    logical_key="other",
+                )
+                current_b = replace(
+                    self._entry("b-current", "B current", run_id="b-current"),
+                    stable_identity=old_b.stable_identity,
+                    logical_key="other",
+                )
+                tm.upsert(old_a)
+                tm.upsert(old_b)
+                tm.retire_stale_formal_entries(
+                    [current_b], expected_identities=[old_b.stable_identity]
+                )
+                tm.upsert(current_b)
+
+                preview = tm.stale_formal_identities([new_a, old_b])
+                self.assertEqual((old_a.stable_identity,), preview)
+                before = tm.rows_for(preview)
+                self.assertEqual(
+                    1,
+                    tm.retire_stale_formal_entries(
+                        [new_a, old_b], expected_identities=preview,
+                        expected_rows={
+                            key: tm.row_revision_token(row)
+                            for key, row in before.items()
+                        },
+                    ),
+                )
+                self.assertNotIn(
+                    old_a.stable_identity, tm.rows_for([old_a.stable_identity])
+                )
+                self.assertEqual(
+                    current_b.source_fingerprint,
+                    tm.rows_for([old_b.stable_identity])[old_b.stable_identity][
+                        "source_fingerprint"
+                    ],
+                )
+                self.assertEqual(
+                    "B old",
+                    tm.lookup(old_b.stable_identity,
+                              source_fingerprint=old_b.source_fingerprint).translation,
+                )
+                self.assertEqual(0, tm.retire_stale_formal_entries([old_b]))
+
+    def test_same_count_wrong_identity_and_empty_confirmation_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            with SQLiteTranslationMemory(Path(temp) / "tm.sqlite") as tm:
+                old_a = self._entry("old", "old", run_id="old")
+                new_a = self._entry("new", "", run_id="new", formal=False)
+                tm.upsert(old_a)
+
+                for approved in ([old_a.stable_identity + "-wrong"], []):
+                    with self.subTest(approved=approved):
+                        with self.assertRaisesRegex(RuntimeError, "candidates changed"):
+                            tm.retire_stale_formal_entries(
+                                [new_a], expected_identities=approved
+                            )
+                        self.assertIn(
+                            old_a.stable_identity,
+                            tm.rows_for([old_a.stable_identity]),
+                        )
+                        self.assertEqual(
+                            0, tm.connection.execute(
+                                "SELECT COUNT(*) FROM tm_source_history"
+                            ).fetchone()[0],
+                        )
+
+    def test_changed_before_image_refused_even_if_fingerprint_is_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            with SQLiteTranslationMemory(Path(temp) / "tm.sqlite") as tm:
+                old = self._entry("old", "translation 1", run_id="old")
+                new = self._entry("new", "", run_id="new", formal=False)
+                tm.upsert(old)
+                old_token = tm.row_revision_token(
+                    tm.rows_for([old.stable_identity])[old.stable_identity]
+                )
+                tm.upsert(replace(old, translation="translation 2"))
+                with self.assertRaisesRegex(RuntimeError, "changed since confirmation"):
+                    tm.retire_stale_formal_entries(
+                        [new], expected_identities=[old.stable_identity],
+                        expected_rows={old.stable_identity: old_token},
+                    )
+                self.assertEqual(
+                    "translation 2",
+                    tm.rows_for([old.stable_identity])[old.stable_identity][
+                        "translation"
+                    ],
+                )
+
+    def test_late_snapshot_failure_rolls_back_earlier_archive_and_delete(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            with SQLiteTranslationMemory(Path(temp) / "tm.sqlite") as tm:
+                old_a = self._entry("a-old", "A old", run_id="a-old")
+                old_b = replace(
+                    self._entry("b-old", "B old", run_id="b-old"),
+                    stable_identity="demo:gettext:ui/menu.po:z",
+                    logical_key="z",
+                )
+                new_a = replace(old_a, source_fingerprint="a-new", is_formal=False)
+                new_b = replace(old_b, source_fingerprint="b-new", is_formal=False)
+                tm.upsert(old_a)
+                tm.upsert(old_b)
+                before = tm.rows_for([old_a.stable_identity, old_b.stable_identity])
+                tokens = {
+                    key: tm.row_revision_token(row) for key, row in before.items()
+                }
+                tokens[old_b.stable_identity] = "wrong-token"
+                with self.assertRaisesRegex(RuntimeError, "changed since confirmation"):
+                    tm.retire_stale_formal_entries(
+                        [new_a, new_b],
+                        expected_identities=[old_a.stable_identity, old_b.stable_identity],
+                        expected_rows=tokens,
+                    )
+                self.assertEqual(before, tm.rows_for(list(before)))
+                self.assertEqual(
+                    0, tm.connection.execute(
+                        "SELECT COUNT(*) FROM tm_source_history"
+                    ).fetchone()[0],
+                )
+
+    def test_missing_confirmed_candidate_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            with SQLiteTranslationMemory(Path(temp) / "tm.sqlite") as tm:
+                old = self._entry("old", "old", run_id="old")
+                tm.upsert(old)
+                with self.assertRaisesRegex(RuntimeError, "candidates changed"):
+                    tm.retire_stale_formal_entries(
+                        [], expected_identities=[old.stable_identity]
+                    )
+                self.assertIn(old.stable_identity, tm.rows_for([old.stable_identity]))
 
 
 if __name__ == "__main__":

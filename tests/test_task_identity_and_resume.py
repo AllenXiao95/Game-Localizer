@@ -15,10 +15,13 @@
 """
 from __future__ import annotations
 
+import io
 import json
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
@@ -319,6 +322,144 @@ class StaleFormalConfirmationTests(_Case):
         self.assertTrue(Path(outcome["backup"]).is_file())
         with SQLiteTranslationMemory(config.tm.database) as tm:
             self.assertNotIn(unit.stable_identity, tm.rows_for([unit.stable_identity]))
+
+
+    def _mixed_stale_and_history(self):
+        """Synthetic plan: one new fingerprint and one valid sibling history hit."""
+        config = _config(self.root)
+        a = TranslationUnit(
+            project_id="game", adapter_id="gettext",
+            relative_path="gui/menu.mo", logical_key="a", source_text="a-new",
+            source_locale="ru-RU", target_locale="zh-Hans",
+        )
+        b = TranslationUnit(
+            project_id="game", adapter_id="gettext",
+            relative_path="gui/menu.mo", logical_key="b", source_text="b-history",
+            source_locale="ru-RU", target_locale="zh-Hans",
+        )
+
+        def formal(unit, source, translation):
+            return TMEntry(
+                stable_identity=unit.stable_identity, project_id="game",
+                adapter_id="gettext", relative_path="gui/menu.mo",
+                logical_key=unit.logical_key, source_text=source,
+                source_fingerprint=sha256(source.encode("utf-8")).hexdigest(),
+                translation=translation, origin="machine",
+                review_state="unreviewed", match_scope="coordinate_exact",
+                quality_state="passed", is_formal=True,
+            )
+
+        old_a = formal(a, "a-old", "A old")
+        history_b = formal(b, "b-history", "B history")
+        current_b = formal(b, "b-current", "B current")
+        with SQLiteTranslationMemory(config.tm.database) as tm:
+            tm.upsert(old_a)
+            tm.upsert(history_b)
+            tm.retire_stale_formal_entries(
+                [current_b], expected_identities=[b.stable_identity]
+            )
+            tm.upsert(current_b)
+
+        plan = SimpleNamespace(
+            fingerprint="mixed-plan",
+            resources=(SimpleNamespace(units=(a, b)),),
+            as_dict=lambda: {
+                "plan_fingerprint": "mixed-plan", "files_total": 1,
+                "files_pending": 1, "extracted_units": 2, "tm_hits": 1,
+                "embedded_translations": 0, "pending_units": 1,
+                "filtered_units": 0, "by_match_scope": {}, "files": [],
+            },
+        )
+
+        class Runner:
+            def __init__(self, _config):
+                pass
+
+            def plan(self):
+                return plan
+
+        service = TaskService(config, runner_factory=Runner)
+        self.addCleanup(service.shutdown)
+        return config, a, b, old_a, current_b, plan, service
+
+    def test_web_confirm_mixed_stale_and_exact_history(self) -> None:
+        config, a, b, old_a, current_b, _plan, service = self._mixed_stale_and_history()
+        preflight = service.preflight({
+            "version": "1", "source_path": str(self.root / "game"), "mode": "preview"
+        })
+        self.assertEqual([a.stable_identity], preflight["stale_formal"]["identities"])
+        self.assertIn("old_row_token", preflight["stale_formal"]["entries"][0])
+        response = service.confirm_stale({"preflight_id": preflight["preflight_id"]})
+        self.assertEqual(1, response["removed"])
+        with SQLiteTranslationMemory(config.tm.database) as tm:
+            rows = tm.rows_for([a.stable_identity, b.stable_identity])
+            self.assertNotIn(a.stable_identity, rows)
+            self.assertEqual(
+                current_b.source_fingerprint, rows[b.stable_identity]["source_fingerprint"]
+            )
+            self.assertEqual(
+                "B history",
+                tm.lookup(
+                    b.stable_identity,
+                    source_fingerprint=sha256(b"b-history").hexdigest(),
+                ).translation,
+            )
+
+    def test_web_confirm_refuses_changed_row_after_preflight(self) -> None:
+        config, a, b, old_a, _current_b, _plan, service = self._mixed_stale_and_history()
+        preflight = service.preflight({
+            "version": "1", "source_path": str(self.root / "game"), "mode": "preview"
+        })
+        with SQLiteTranslationMemory(config.tm.database) as tm:
+            tm.upsert(replace(old_a, translation="later edit"))
+        with self.assertRaisesRegex(RuntimeError, "changed since confirmation"):
+            service.confirm_stale({"preflight_id": preflight["preflight_id"]})
+        with SQLiteTranslationMemory(config.tm.database) as tm:
+            self.assertEqual(
+                "later edit", tm.rows_for([a.stable_identity])[a.stable_identity][
+                    "translation"
+                ]
+            )
+
+    def test_web_old_confirmation_requires_new_preflight(self) -> None:
+        _config, a, _b, _old_a, _current_b, _plan, service = (
+            self._mixed_stale_and_history()
+        )
+        preflight = service.preflight({
+            "version": "1", "source_path": str(self.root / "game"), "mode": "preview"
+        })
+        service._preflights[preflight["preflight_id"]]["stale_formal"]["entries"][0].pop(
+            "old_row_token"
+        )
+        with self.assertRaisesRegex(ValueError, "run a new preflight"):
+            service.confirm_stale({"preflight_id": preflight["preflight_id"]})
+
+    def test_cli_apply_uses_previewed_subset(self) -> None:
+        from localizer.cli.main import review_retire
+
+        config, a, b, _old_a, current_b, plan, _service = (
+            self._mixed_stale_and_history()
+        )
+        output = io.StringIO()
+        with mock.patch(
+            "localizer.cli.main.load_project_config", return_value=config
+        ), mock.patch("localizer.cli.main.ProjectRunner") as runner:
+            runner.return_value.plan.return_value = plan
+            with redirect_stdout(output):
+                review_retire(
+                    Path("synthetic.yaml"), stale=True, variant=None,
+                    apply=True, backup=self.root / "cli-tm-backup.sqlite",
+                )
+        report = json.loads(output.getvalue())
+        self.assertEqual(1, report["stale_formal"])
+        self.assertEqual(1, report["removed"])
+        self.assertTrue(Path(report["backup"]).is_file())
+        with SQLiteTranslationMemory(config.tm.database) as tm:
+            rows = tm.rows_for([a.stable_identity, b.stable_identity])
+            self.assertNotIn(a.stable_identity, rows)
+            self.assertEqual(
+                current_b.source_fingerprint, rows[b.stable_identity]["source_fingerprint"]
+            )
 
 
 class ResumeGateTests(_Case):

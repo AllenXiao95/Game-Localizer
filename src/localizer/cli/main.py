@@ -724,7 +724,14 @@ def review_retire(
             finally:
                 destination.close()
             result["backup"] = str(backup_path)
-            result["removed"] = tm.retire_stale_formal_entries(candidates)
+            result["removed"] = tm.retire_stale_formal_entries(
+                [entry for entry in candidates if entry.stable_identity in identities],
+                expected_identities=identities,
+                expected_rows={
+                    identity: tm.row_revision_token(rows[identity])
+                    for identity in identities
+                },
+            )
             result["applied"] = True
     typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
 
