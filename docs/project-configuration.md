@@ -218,6 +218,12 @@ provider:
 
 保留这个块就必须安装 `.[tokenizer-huggingface]`。`model` 是 tokenizer 身份，与上面的服务端 `model` 独立；删除整个块则使用保守估算器。
 
+`revision` 省略、设为 `null` 或留空时使用仓库默认分支 `main`；指定 commit 或 tag 时按该版本加载。切换 tokenizer 仓库后需要下载对应文件，旧模型的缓存不会自动复用。
+
+程序优先加载指定模型与版本的本地缓存；缓存齐全时，即使 `local_files_only: false` 也不会联网。缺少缓存时允许下载；如果 `hf-mirror.com` 加载失败，会自动通过显式端点尝试 `https://huggingface.co`，只补齐同一模型与版本的 tokenizer 文件，不下载模型权重，也不修改进程的 `HF_ENDPOINT`。官方源成功后从本地快照加载；两处都失败会在错误中分别报告原因。自定义 Hub 不会自动切换到官方源。
+
+日常使用建议保留 `local_files_only: false`，便于更换模型时自动下载；`true` 表示严格离线，缓存缺失时必须先手动补齐或改回 `false`，不会触发官方源回退。设置 `HF_HUB_OFFLINE` 或 `TRANSFORMERS_OFFLINE` 也会禁止回退。更换 tokenizer 仓库时应同时更新或清空旧的 `revision`，避免把旧仓库的 commit 用于新仓库。
+
 ### `tm`
 
 | 字段 | 默认值 | 语义 |

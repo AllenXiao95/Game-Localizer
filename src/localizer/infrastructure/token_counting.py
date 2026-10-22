@@ -1,11 +1,50 @@
 from __future__ import annotations
 
+import logging
+import os
 import threading
 from pathlib import Path
 from typing import Optional, Union
+from urllib.parse import urlsplit
 
 from localizer.application.token_budget import TokenCounter, conservative_token_count
 from localizer.config.models import TokenizerSection
+
+
+logger = logging.getLogger(__name__)
+_OFFICIAL_HUB_ENDPOINT = "https://huggingface.co"
+# Only tokenizer assets and their configuration; never model weights.
+_TOKENIZER_PATTERNS = (
+    "config.json",
+    "tokenizer*",
+    "special_tokens_map.json",
+    "added_tokens.json",
+    "vocab*",
+    "merges.txt",
+    "spiece.model",
+    "sentencepiece*",
+    "chat_template*",
+    "*.tiktoken",
+)
+
+
+def _offline_environment() -> bool:
+    return any(
+        os.environ.get(name, "").strip().upper() in {"1", "ON", "YES", "TRUE"}
+        for name in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE")
+    )
+
+
+def _is_download_error(error: Exception) -> bool:
+    if isinstance(error, OSError):
+        return True
+    # Hub 0.x uses requests (whose errors inherit OSError); Hub 1.x uses
+    # httpx, which can propagate proxy/transport errors without wrapping them.
+    try:
+        import httpx
+    except ImportError:
+        return False
+    return isinstance(error, httpx.HTTPError)
 
 
 class HuggingFaceTokenCounter:
@@ -52,12 +91,7 @@ class HuggingFaceTokenCounter:
                         local_files_only=True,
                     )
                 else:
-                    self._tokenizer = AutoTokenizer.from_pretrained(
-                        source,
-                        revision=self.config.revision,
-                        cache_dir=str(self.cache_dir),
-                        local_files_only=self.config.local_files_only,
-                    )
+                    self._tokenizer = self._load_from_hub(AutoTokenizer)
             except Exception as exc:
                 message = (
                     "failed to initialize configured tokenizer "
@@ -67,6 +101,59 @@ class HuggingFaceTokenCounter:
                 self._load_error = RuntimeError(message)
                 raise self._load_error from exc
             return self._tokenizer
+
+    def _load_from_hub(self, auto_tokenizer):
+        try:
+            return auto_tokenizer.from_pretrained(
+                self.config.model,
+                revision=self.config.revision,
+                cache_dir=str(self.cache_dir),
+                local_files_only=self.config.local_files_only or _offline_environment(),
+            )
+        except Exception as primary_error:
+            if not _is_download_error(primary_error):
+                raise
+            from huggingface_hub import constants, snapshot_download
+
+            # Match the endpoint actually used by Transformers. Hub constants
+            # are read at import time; changing os.environ here is insufficient
+            # and would also race with other projects' workers.
+            endpoint = constants.ENDPOINT
+            offline = self.config.local_files_only or constants.HF_HUB_OFFLINE
+            offline = offline or _offline_environment()
+            # hf-mirror is a public mirror of the official Hub. Do not silently
+            # redirect private/custom Hub identities to another service.
+            if offline or urlsplit(endpoint).hostname != "hf-mirror.com":
+                raise
+            logger.warning(
+                "Tokenizer download from hf-mirror.com failed for %s; "
+                "retrying the same model/revision at %s",
+                self.config.model,
+                _OFFICIAL_HUB_ENDPOINT,
+            )
+            try:
+                snapshot = Path(
+                    snapshot_download(
+                        repo_id=self.config.model,
+                        revision=self.config.revision,
+                        cache_dir=str(self.cache_dir),
+                        endpoint=_OFFICIAL_HUB_ENDPOINT,
+                        allow_patterns=list(_TOKENIZER_PATTERNS),
+                    )
+                )
+                # Load by directory so optional file probes cannot return to
+                # the broken mirror after the official download succeeds.
+                return auto_tokenizer.from_pretrained(
+                    str(snapshot), local_files_only=True
+                )
+            except Exception as fallback_error:
+                raise RuntimeError(
+                    "tokenizer mirror download and official fallback both failed; "
+                    f"mirror (hf-mirror.com): {primary_error}; "
+                    f"official ({_OFFICIAL_HUB_ENDPOINT}): {fallback_error}; "
+                    "check connectivity and the tokenizer model/revision, or "
+                    "pre-download the exact tokenizer into the configured cache"
+                ) from fallback_error
 
     def __call__(self, text: str) -> int:
         # 自定义 tokenizer 不一定声明线程安全；锁住 encode，保证多 worker 确定性。
@@ -115,6 +202,7 @@ def resolve_tokenizer_source(
             "configured local tokenizer snapshot is unavailable or incomplete: "
             f"model={config.model!r}, revision={config.revision!r}, "
             f"cache={str(Path(cache_dir))!r}, snapshot={detail!r}; "
+            "set provider.tokenizer.local_files_only=false to allow downloads, "
             "pin a cached revision containing tokenizer data or configure a local snapshot path"
         )
     return config.model

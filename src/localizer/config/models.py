@@ -248,6 +248,16 @@ class TokenizerSection(StrictModel):
             raise ValueError("tokenizer model must not be empty")
         return value
 
+    @validator("revision")
+    def tokenizer_revision_uses_default_when_blank(
+        cls, value: Optional[str]
+    ) -> Optional[str]:
+        # The Hub defaults None to main, but treats '' as a literal revision
+        # (resolve//...). Keep remote downloads and local cache resolution aligned.
+        if value is None:
+            return None
+        return value.strip() or None
+
 
 class ProviderSection(StrictModel):
     type: Literal["openai_compatible"] = "openai_compatible"

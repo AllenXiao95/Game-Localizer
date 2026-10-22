@@ -195,6 +195,12 @@ provider:
 
 Keeping this block requires `.[tokenizer-huggingface]`. Its model identity is independent of the provider model; removing it selects conservative estimation.
 
+An omitted, null, or blank `revision` uses the default branch `main`; an explicit commit or tag loads that version. Switching tokenizer repositories requires downloading the corresponding files; another model's cache is not reused automatically.
+
+An exact usable local snapshot takes priority, without network access even when `local_files_only: false`. If downloading through `hf-mirror.com` fails, the loader retries the same model/revision at the explicit `https://huggingface.co` endpoint, downloading only tokenizer assets rather than model weights. It loads the downloaded directory locally without changing the process-wide `HF_ENDPOINT`. If both attempts fail, the error includes both causes. Custom Hubs are not automatically redirected to the official service.
+
+Keep `local_files_only: false` for automatic downloads when switching models. Set it to `true` for strict offline operation; missing assets must then be supplied manually or the setting changed to `false`. `HF_HUB_OFFLINE` and `TRANSFORMERS_OFFLINE` also disable the official fallback. When changing tokenizer repositories, update or clear the old `revision` as well, since a commit from the previous repository may not exist in the new one.
+
 ### `tm`
 
 | Field | Default | Meaning |
